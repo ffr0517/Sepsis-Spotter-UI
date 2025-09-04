@@ -1,5 +1,74 @@
 import os, re, json, time, requests, gradio as gr
 
+# ---- Optional tiny LLM for parsing (CPU) ----
+USE_LLM = False
+_llm_pipe = None
+
+def _load_tiny_llm():
+    global _llm_pipe
+    if _llm_pipe is not None:
+        return _llm_pipe
+    try:
+        from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+        model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+        tok = AutoTokenizer.from_pretrained(model_id)
+        mdl = AutoModelForCausalLM.from_pretrained(model_id)
+        _llm_pipe = pipeline(
+            "text-generation",
+            model=mdl,
+            tokenizer=tok,
+            # keep it small for CPU
+            max_new_tokens=256,
+            do_sample=False,
+            temperature=0.0,
+        )
+        return _llm_pipe
+    except Exception as e:
+        print("LLM load failed, falling back to regex:", e)
+        _llm_pipe = None
+        return None
+
+SYSTEM_PROMPT = (
+    "You are a clinical intake assistant. Extract only structured fields needed for a sepsis risk model.\n"
+    "Return STRICT JSON with keys:\n"
+    "{\n"
+    '  "clinical": {\n'
+    '    "age.months": <number>, "sex": <0 for male, 1 for female>, "hr.all": <int>,\n'
+    '    "rr.all": <int>, "oxy.ra": <int>, ... (optional extras)\n'
+    "  },\n"
+    '  "labs": { "CRP": <number>, "PCT": <number>, "Lactate": <number>, "WBC": <number>, "Neutrophils": <number>, "Platelets": <number> }\n'
+    "}\n"
+    "Rules:\n"
+    "- Convert years to months.\n"
+    "- For sex, map male/boy→0, female/girl→1.\n"
+    "- If a value is missing, omit the key (do not invent values).\n"
+    "- Output ONLY JSON. No commentary.\n"
+)
+
+def llm_extract_to_dict(user_text: str) -> dict:
+    if not USE_LLM:
+        return {}
+    pipe = _load_tiny_llm()
+    if pipe is None:
+        return {}
+    prompt = (
+        SYSTEM_PROMPT
+        + "\n\nUser text:\n"
+        + user_text.strip()
+        + "\n\nJSON:"
+    )
+    out = pipe(prompt)[0]["generated_text"]
+    # Try to locate a JSON object in the output
+    import re, json
+    m = re.search(r"\{[\s\S]*\}\s*$", out)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+
 # --------------------------------
 # Config via env (set in Spaces → Settings → Variables)
 # --------------------------------
@@ -105,7 +174,21 @@ def call_s2(features):
 # Orchestration
 # --------------------------------
 def run_pipeline(state, user_text, stage="auto"):
-    clin_new, labs_new, _ = extract_features(user_text or "")
+    # 1) Try LLM extraction
+    blob = llm_extract_to_dict(user_text or "")
+    clin_new = (blob.get("clinical") or {}) if isinstance(blob, dict) else {}
+
+    # 2) Fallback to regex for anything missing
+    rx_clin, rx_labs, _ = extract_features(user_text or "")
+    # Merge (LLM has priority; regex fills gaps)
+    for k, v in rx_clin.items():
+        if k not in clin_new:
+            clin_new[k] = v
+    labs_new = (blob.get("labs") or {}) if isinstance(blob, dict) else {}
+    for k, v in rx_labs.items():
+        if k not in labs_new:
+            labs_new[k] = v
+
     sheet = state.get("sheet") or new_sheet()
     sheet = merge_sheet(sheet, clin_new, labs_new)
 
@@ -149,7 +232,7 @@ with gr.Blocks(fill_height=True) as demo:
     gr.Markdown("### Spot Sepsis — Research Preview *(Not medical advice)*")
     with gr.Row():
         with gr.Column(scale=3):
-            chat = gr.Chatbot(height=420)
+            chat = gr.Chatbot(height=420, type="tuples")
             msg = gr.Textbox(placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')", lines=3)
             with gr.Row():
                 btn_s1 = gr.Button("Run S1")
