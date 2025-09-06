@@ -19,9 +19,9 @@ jobs:
       - name: Clone Space repo
         env:
           HF_TOKEN: ${{ secrets.HF_SPACE }}
-          SPACE_ID: ${{ vars.SPACE_ID }}
+          SPACE_ID: ${{ vars.SPACE_ID }}  
         run: |
-          git clone https://oauth2:${HF_SPACE}@huggingface.co/spaces/${SPACE_ID} space_repo
+          git clone https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${SPACE_ID} space_repo
 
       - name: Sync files to Space (root only)
         run: |
@@ -39,3 +39,5 @@ jobs:
             git commit -m "Deploy from GitHub Actions"
             git push
           fi
+
+
