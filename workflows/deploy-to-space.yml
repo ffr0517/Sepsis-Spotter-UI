@@ -1,0 +1,41 @@
+name: Deploy to Hugging Face Space
+
+on:
+  push:
+    branches: [ main ] 
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up git creds for Hugging Face
+        run: |
+          git config --global user.email "ci@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Clone Space repo
+        env:
+          HF_TOKEN: ${{ secrets.HF_SPACE }}
+          SPACE_ID: ${{ vars.SPACE_ID }}
+        run: |
+          git clone https://oauth2:${HF_SPACE}@huggingface.co/spaces/${SPACE_ID} space_repo
+
+      - name: Sync files to Space (root only)
+        run: |
+          rsync -av --delete --exclude '.git' \
+            app.py requirements.txt README.md runtime.txt \
+            space_repo/
+
+      - name: Commit & push to Space
+        working-directory: space_repo
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to deploy."
+          else
+            git commit -m "Deploy from GitHub Actions"
+            git push
+          fi
