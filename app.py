@@ -1,6 +1,6 @@
 import os, re, json, time, requests, gradio as gr
 
-# ---- Optional tiny LLM for parsing (CPU/Spaces) ----
+# ---- Optional tiny LLM for parsing/orchestration (CPU/Spaces) ----
 USE_LLM_DEFAULT = True  # default for the UI checkbox
 MODEL_ID = os.getenv("LLM_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")  # tiny & fast on CPU
 _llm_pipe = None
@@ -26,7 +26,7 @@ def _load_tiny_llm():
             "text-generation",
             model=mdl,
             tokenizer=tok,
-            max_new_tokens=128,             # keep it tight for speed
+            max_new_tokens=256,             # a bit more room for the agent command
             do_sample=False,                # deterministic; no temperature needed
         )
         # Pre-warm a touch so first real call is faster
@@ -40,6 +40,63 @@ def _load_tiny_llm():
         _llm_pipe = None
         return None
 
+# ------------------------------
+# Agent system prompt (LLM is the orchestrator)
+# ------------------------------
+AGENT_SYSTEM = """
+You are SepsisAgent, a friendly clinical intake assistant in a research preview app (not medical advice).
+Your job each turn:
+- Talk naturally with the user.
+- Extract only the fields needed for a sepsis risk model.
+- When enough info exists, call the model API.
+- If info is missing or invalid, ask a concise, specific follow-up (one question at a time).
+
+API schema you can call:
+- S1 (clinical-only) REQUIRES the keys: age.months, sex (0 male, 1 female), hr.all, rr.all, oxy.ra
+- S2 (if any labs provided) uses clinical + any labs (e.g., CRP, PCT, Lactate, WBC, Neutrophils, Platelets).
+  If labs exist and clinical is sufficient, prefer S2. Never invent values.
+
+Parsing/conventions:
+- Convert years to months for age.
+- Map sex: male/boy→0, female/girl→1.
+- Only include keys you are confident about.
+- Keep messages brief, warm, and clearly non-diagnostic.
+
+Return STRICT JSON with EXACTLY ONE of these commands each turn:
+
+{
+  "action": "ask",
+  "message": "<friendly single question for the next required/unclear field>"
+}
+
+{
+  "action": "update_sheet",
+  "features": {
+    "clinical": { /* any subset you confidently parsed */ },
+    "labs": { /* any subset you confidently parsed */ }
+  },
+  "message": "<brief natural reply to show the user>"
+}
+
+{
+  "action": "call_api",
+  "stage": "auto" | "S1" | "S2",
+  "features": {
+    "clinical": { /* the full set for S1 if stage=S1 or stage=auto leading to S1 */ },
+    "labs": { /* optional; include if present */ }
+  },
+  "message": "<brief status (e.g., 'Running S1 now…')>"
+}
+
+Important:
+- Prefer S2 if labs exist AND clinical requirements are satisfied; otherwise use S1.
+- If required clinical fields are missing, do NOT call the API yet; ask for the next specific field.
+- NEVER output anything except a single JSON object for the command.
+"""
+
+# ------------------------------
+# Legacy extractor prompt (still available for toggle OFF path)
+# ------------------------------
 SYSTEM_PROMPT = (
     "You are a clinical intake assistant. Extract only structured fields needed for a sepsis risk model.\n"
     "Return STRICT JSON with keys:\n"
@@ -57,17 +114,16 @@ SYSTEM_PROMPT = (
     "- Output ONLY JSON. No commentary.\n"
 )
 
-# Safe call with timeout + JSON extraction
+# Safe call with timeout + JSON extraction (legacy helper)
 def llm_extract_to_dict(user_text: str, timeout_s: int = 15) -> dict:
     """
-    Run a small LLM to extract structured fields.
-    If anything goes wrong or times out, return {} so regex can fill gaps.
+    Run a small LLM to extract structured fields. If anything goes wrong, return {} so regex can fill gaps.
     """
     pipe = _load_tiny_llm()
     if pipe is None:
         return {}
 
-    import concurrent.futures, re, json
+    import concurrent.futures
 
     prompt = f"{SYSTEM_PROMPT}\n\nUser text:\n{(user_text or '').strip()}\n\nJSON:"
 
@@ -85,10 +141,8 @@ def llm_extract_to_dict(user_text: str, timeout_s: int = 15) -> dict:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             fut = ex.submit(_call)
             return fut.result(timeout=timeout_s)
-    except Exception as _:
-        # Timeout or any other error → graceful fallback
+    except Exception:
         return {}
-
 
 # --------------------------------
 # Config via env (set in Spaces → Settings → Variables)
@@ -105,7 +159,7 @@ OPTIONAL_S1 = [
 LAB_KEYS = ["CRP","PCT","Lactate","WBC","Neutrophils","Platelets"]  # add/remove as needed
 
 # --------------------------------
-# Simple rule-based extractor (robust + free)
+# Simple rule-based extractor (robust + free) for legacy path
 # --------------------------------
 def extract_features(text: str):
     clinical, labs, notes = {}, {}, []
@@ -192,14 +246,59 @@ def call_s2(features):
     return r.json()
 
 # --------------------------------
-# Orchestration
+# Agent helpers (LLM orchestrator)
 # --------------------------------
-def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT):
-    # 1) Try LLM extraction (optional)
-    blob = llm_extract_to_dict(user_text or "") if use_llm else {}
+def _coerce_json(s: str) -> dict:
+    """
+    Extract the last {...} block and parse as JSON. Tolerant to prompt echoing.
+    """
+    m = re.search(r"\{[\s\S]*\}\s*$", s)
+    if not m:
+        return {}
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+def agent_step(user_text: str, sheet: dict | None):
+    """
+    Build a minimal context (current sheet + user turn), ask the LLM for ONE command JSON.
+    """
+    pipe = _load_tiny_llm()
+    if pipe is None:
+        return {"action": "fallback"}  # triggers legacy path
+
+    sheet = sheet or new_sheet()
+    context = {
+        "sheet": sheet,
+        "note": "Reply with exactly one JSON command per the contract."
+    }
+    prompt = (
+        AGENT_SYSTEM +
+        "\n\n--- CONTEXT ---\n" +
+        json.dumps(context, indent=2) +
+        "\n\n--- USER ---\n" +
+        (user_text or "").strip() +
+        "\n\n--- COMMAND JSON ---\n"
+    )
+    out = pipe(prompt)[0]["generated_text"]
+    return _coerce_json(out)
+
+def merge_features(sheet, feats):
+    return merge_sheet(
+        sheet,
+        (feats or {}).get("clinical", {}),
+        (feats or {}).get("labs", {})
+    )
+
+# --------------------------------
+# Legacy pipeline (used when toggle OFF or agent fallback)
+# --------------------------------
+def run_pipeline_legacy(state, user_text, stage="auto"):
+    # 1) Try LLM extraction (legacy) then regex fallback
+    blob = llm_extract_to_dict(user_text or "")
     clin_new = (blob.get("clinical") or {}) if isinstance(blob, dict) else {}
 
-    # 2) Fallback to regex for anything missing
     rx_clin, rx_labs, _ = extract_features(user_text or "")
     for k, v in rx_clin.items():
         if k not in clin_new:
@@ -216,7 +315,7 @@ def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT
     if stage == "auto":
         stage = "S2" if sheet["features"]["labs"] else "S1"
 
-    # Validate S1 inputs if running S1
+    # Validate S1
     missing, warns = validate_complete(sheet["features"]["clinical"])
     if stage == "S1" and missing:
         msg = "Missing required fields for S1: " + ", ".join(missing) + ". Please provide them."
@@ -230,7 +329,6 @@ def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT
             state["sheet"] = sheet
             summary = f"**S1 decision:** {s1.get('s1_decision')}\n\n**Current Info Sheet:**\n```json\n{json.dumps(sheet, indent=2)}\n```"
             return state, summary
-
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
             s2 = call_s2(features)
@@ -238,12 +336,80 @@ def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT
             state["sheet"] = sheet
             summary = f"**S2 decision:** {s2.get('s2_decision')}\n\n**Current Info Sheet:**\n```json\n{json.dumps(sheet, indent=2)}\n```"
             return state, summary
-
         else:
             return state, "Unknown stage."
-
     except Exception as e:
         return state, f"Error calling API: {e}"
+
+# --------------------------------
+# Orchestration (Agent-first when toggle ON)
+# --------------------------------
+def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT):
+    state.setdefault("sheet", None)
+
+    if use_llm:
+        cmd = agent_step(user_text, state["sheet"])
+        if not cmd:
+            # Agent failed to emit JSON; soft nudge
+            return state, "Sorry, I didn’t catch that. Could you share the age, sex, HR, RR, and SpO₂?"
+
+        action = cmd.get("action")
+
+        if action == "fallback":
+            # LLM unavailable → legacy flow
+            return run_pipeline_legacy(state, user_text, stage)
+
+        if action == "update_sheet":
+            state["sheet"] = merge_features(state.get("sheet") or new_sheet(), cmd.get("features"))
+            msg = cmd.get("message") or "Noted."
+            return state, msg
+
+        if action == "ask":
+            # Show the LLM's question (sheet unchanged)
+            return state, cmd.get("message") or "Could you clarify that?"
+
+        if action == "call_api":
+            # Merge the LLM-provided features before calling
+            fs = cmd.get("features") or {}
+            stage_req = cmd.get("stage") or "auto"
+            sheet = merge_features(state.get("sheet") or new_sheet(), fs)
+
+            # If agent left stage=auto, decide based on presence of labs
+            if stage_req == "auto":
+                stage_req = "S2" if sheet["features"]["labs"] else "S1"
+
+            # Optional guardrail for S1 minimums
+            missing, _ = validate_complete(sheet["features"]["clinical"])
+            if stage_req == "S1" and missing:
+                # Hand back to agent in the next turn by informing the user
+                state["sheet"] = sheet
+                need = ", ".join(missing)
+                return state, f"I still need: {need}."
+
+            try:
+                if stage_req == "S1":
+                    s1 = call_s1(sheet["features"]["clinical"])
+                    sheet["s1"] = s1
+                    state["sheet"] = sheet
+                    msg = cmd.get("message") or "Running S1…"
+                    return state, f"{msg}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+                elif stage_req == "S2":
+                    features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
+                    s2 = call_s2(features)
+                    sheet["s2"] = s2
+                    state["sheet"] = sheet
+                    msg = cmd.get("message") or "Running S2…"
+                    return state, f"{msg}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+                else:
+                    return state, "Unknown stage."
+            except Exception as e:
+                return state, f"Error calling API: {e}"
+
+        # Unknown action → gentle nudge
+        return state, "I’m not sure I can act on that—could you rephrase?"
+
+    # ---------- Toggle OFF: legacy behavior ----------
+    return run_pipeline_legacy(state, user_text, stage)
 
 # --------------------------------
 # In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
@@ -279,10 +445,10 @@ with gr.Blocks(fill_height=True) as ui:
                     placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')",
                     lines=3
                 )
-                # ✅ Add the UI toggle
+                # ✅ LLM orchestrator toggle
                 use_llm_chk = gr.Checkbox(
                     value=USE_LLM_DEFAULT,
-                    label="Use tiny LLM parser (beta)"
+                    label="Use tiny LLM (agent mode, beta)"
                 )
                 with gr.Row():
                     btn_s1 = gr.Button("Run S1")
@@ -300,7 +466,6 @@ with gr.Blocks(fill_height=True) as ui:
             history = history + [(text, None)]
             return history, ""
 
-        # ✅ Accept the checkbox value and pass it to run_pipeline
         def on_bot_reply(history, st, stage, use_llm):
             st, reply = run_pipeline(st, history[-1][0], stage, use_llm=bool(use_llm))
             history[-1] = (history[-1][0], reply)
@@ -322,7 +487,7 @@ with gr.Blocks(fill_height=True) as ui:
                 st["sheet"] = blob
             return st, "Merged.", json.dumps(st["sheet"], indent=2)
 
-        # ✅ Wire the checkbox through all interaction chains
+        # Wire chat + buttons (pass checkbox through)
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
         )
@@ -337,7 +502,7 @@ with gr.Blocks(fill_height=True) as ui:
         )
         merge_btn.click(on_merge, [state, paste], [state, tips, info])
 
-    # Wire the login button (unchanged)
+    # Wire the login button
     login_btn.click(check_login, [u, p], [login_view, app_view, login_msg])
 
 # ---- Launch settings: Spaces vs local ---------------------------------
