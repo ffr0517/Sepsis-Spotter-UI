@@ -275,7 +275,15 @@ with gr.Blocks(fill_height=True) as ui:
         with gr.Row():
             with gr.Column(scale=3):
                 chat = gr.Chatbot(height=420, type="tuples")
-                msg = gr.Textbox(placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')", lines=3)
+                msg = gr.Textbox(
+                    placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')",
+                    lines=3
+                )
+                # ✅ Add the UI toggle
+                use_llm_chk = gr.Checkbox(
+                    value=USE_LLM_DEFAULT,
+                    label="Use tiny LLM parser (beta)"
+                )
                 with gr.Row():
                     btn_s1 = gr.Button("Run S1")
                     btn_s2 = gr.Button("Run S2 (with labs)")
@@ -292,8 +300,9 @@ with gr.Blocks(fill_height=True) as ui:
             history = history + [(text, None)]
             return history, ""
 
-        def on_bot_reply(history, st, stage):
-            st, reply = run_pipeline(st, history[-1][0], stage)
+        # ✅ Accept the checkbox value and pass it to run_pipeline
+        def on_bot_reply(history, st, stage, use_llm):
+            st, reply = run_pipeline(st, history[-1][0], stage, use_llm=bool(use_llm))
             history[-1] = (history[-1][0], reply)
             info_json = json.dumps(st["sheet"], indent=2) if st.get("sheet") else ""
             return history, st, info_json, ""
@@ -313,21 +322,22 @@ with gr.Blocks(fill_height=True) as ui:
                 st["sheet"] = blob
             return st, "Merged.", json.dumps(st["sheet"], indent=2)
 
+        # ✅ Wire the checkbox through all interaction chains
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("auto")], [chat, state, info, msg]
+            on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
         )
         btn_s1.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("S1")], [chat, state, info, msg]
+            on_bot_reply, [chat, state, gr.State("S1"), use_llm_chk], [chat, state, info, msg]
         )
         btn_s2.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("S2")], [chat, state, info, msg]
+            on_bot_reply, [chat, state, gr.State("S2"), use_llm_chk], [chat, state, info, msg]
         )
         btn_auto.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("auto")], [chat, state, info, msg]
+            on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
         )
         merge_btn.click(on_merge, [state, paste], [state, tips, info])
 
-    # Wire the login button
+    # Wire the login button (unchanged)
     login_btn.click(check_login, [u, p], [login_view, app_view, login_msg])
 
 # ---- Launch settings: Spaces vs local ---------------------------------
