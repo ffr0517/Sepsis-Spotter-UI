@@ -44,55 +44,22 @@ def _load_tiny_llm():
 # Agent system prompt (LLM is the orchestrator)
 # ------------------------------
 AGENT_SYSTEM = """
-You are SepsisAgent, a friendly clinical intake assistant in a research preview app (not medical advice).
-Your job each turn:
-- Talk naturally with the user.
-- Extract only the fields needed for a sepsis risk model.
-- When enough info exists, call the model API.
-- If info is missing or invalid, ask a concise, specific follow-up (one question at a time).
+You are SepsisAgent in a research preview (not medical advice).
+Your job: converse naturally, extract required fields, ask for missing info (one question at a time), and call S1/S2 when ready.
 
-API schema you can call:
-- S1 (clinical-only) REQUIRES the keys: age.months, sex (0 male, 1 female), hr.all, rr.all, oxy.ra
-- S2 (if any labs provided) uses clinical + any labs (e.g., CRP, PCT, Lactate, WBC, Neutrophils, Platelets).
-  If labs exist and clinical is sufficient, prefer S2. Never invent values.
+API:
+- S1 requires: age.months, sex (0 male, 1 female), hr.all, rr.all, oxy.ra
+- S2 uses clinical + any labs (CRP, PCT, Lactate, WBC, Neutrophils, Platelets). Prefer S2 if labs exist and clinical is sufficient.
 
-Parsing/conventions:
-- Convert years to months for age.
-- Map sex: male/boy→0, female/girl→1.
-- Only include keys you are confident about.
-- Keep messages brief, warm, and clearly non-diagnostic.
+Conventions: convert years→months; map sex male/boy→0, female/girl→1; do not invent values.
 
-Return STRICT JSON with EXACTLY ONE of these commands each turn:
-
-{
-  "action": "ask",
-  "message": "<friendly single question for the next required/unclear field>"
-}
-
-{
-  "action": "update_sheet",
-  "features": {
-    "clinical": { /* any subset you confidently parsed */ },
-    "labs": { /* any subset you confidently parsed */ }
-  },
-  "message": "<brief natural reply to show the user>"
-}
-
-{
-  "action": "call_api",
-  "stage": "auto" | "S1" | "S2",
-  "features": {
-    "clinical": { /* the full set for S1 if stage=S1 or stage=auto leading to S1 */ },
-    "labs": { /* optional; include if present */ }
-  },
-  "message": "<brief status (e.g., 'Running S1 now…')>"
-}
-
-Important:
-- Prefer S2 if labs exist AND clinical requirements are satisfied; otherwise use S1.
-- If required clinical fields are missing, do NOT call the API yet; ask for the next specific field.
-- NEVER output anything except a single JSON object for the command.
+OUTPUT: return EXACTLY ONE JSON object between <<<JSON> and </JSON>>> with one of:
+1) {"action":"ask","message":"<your own brief question>"} 
+2) {"action":"update_sheet","features":{"clinical":{...},"labs":{...}},"message":"<your own brief acknowledgement>"} 
+3) {"action":"call_api","stage":"auto"|"S1"|"S2","features":{"clinical":{...},"labs":{...}},"message":"<your own brief status>"}
+No text outside the JSON tags.
 """
+
 
 # ------------------------------
 # Legacy extractor prompt (still available for toggle OFF path)
@@ -344,71 +311,47 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
 # --------------------------------
 # Orchestration (Agent-first when toggle ON)
 # --------------------------------
-def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT):
-    state.setdefault("sheet", None)
+DEBUG_AGENT = bool(int(os.getenv("DEBUG_AGENT", "0")))
 
+def run_pipeline(state, user_text, stage="auto", use_llm=True):
+    state.setdefault("sheet", None)
     if use_llm:
         cmd = agent_step(user_text, state["sheet"])
         if not cmd:
-            # Agent failed to emit JSON; soft nudge
-            return state, "Sorry, I didn’t catch that. Could you share the age, sex, HR, RR, and SpO₂?"
+            if DEBUG_AGENT:
+                return state, "(agent output invalid JSON; check logs)"
+            # In prod, you can silently retry agent_step(...) once; otherwise return a minimal neutral token:
+            return state, "…"  # neutral placeholder; no guidance text from you
 
         action = cmd.get("action")
-
-        if action == "fallback":
-            # LLM unavailable → legacy flow
-            return run_pipeline_legacy(state, user_text, stage)
-
         if action == "update_sheet":
             state["sheet"] = merge_features(state.get("sheet") or new_sheet(), cmd.get("features"))
-            msg = cmd.get("message") or "Noted."
-            return state, msg
-
+            return state, (cmd.get("message") or "")
         if action == "ask":
-            # Show the LLM's question (sheet unchanged)
-            return state, cmd.get("message") or "Could you clarify that?"
-
+            return state, (cmd.get("message") or "")
         if action == "call_api":
-            # Merge the LLM-provided features before calling
             fs = cmd.get("features") or {}
             stage_req = cmd.get("stage") or "auto"
             sheet = merge_features(state.get("sheet") or new_sheet(), fs)
-
-            # If agent left stage=auto, decide based on presence of labs
             if stage_req == "auto":
                 stage_req = "S2" if sheet["features"]["labs"] else "S1"
-
-            # Optional guardrail for S1 minimums
-            missing, _ = validate_complete(sheet["features"]["clinical"])
-            if stage_req == "S1" and missing:
-                # Hand back to agent in the next turn by informing the user
-                state["sheet"] = sheet
-                need = ", ".join(missing)
-                return state, f"I still need: {need}."
-
+            # (optional) guard on S1 minimums; otherwise let LLM fully drive
             try:
                 if stage_req == "S1":
                     s1 = call_s1(sheet["features"]["clinical"])
                     sheet["s1"] = s1
                     state["sheet"] = sheet
-                    msg = cmd.get("message") or "Running S1…"
-                    return state, f"{msg}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
-                elif stage_req == "S2":
+                    return state, f"{cmd.get('message','')}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+                else:
                     features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
                     s2 = call_s2(features)
                     sheet["s2"] = s2
                     state["sheet"] = sheet
-                    msg = cmd.get("message") or "Running S2…"
-                    return state, f"{msg}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
-                else:
-                    return state, "Unknown stage."
+                    return state, f"{cmd.get('message','')}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
             except Exception as e:
                 return state, f"Error calling API: {e}"
-
-        # Unknown action → gentle nudge
-        return state, "I’m not sure I can act on that—could you rephrase?"
-
-    # ---------- Toggle OFF: legacy behavior ----------
+        return state, ""  # unknown action → no extra copy
+    # toggle off → legacy
     return run_pipeline_legacy(state, user_text, stage)
 
 # --------------------------------
