@@ -2,7 +2,7 @@ name: Deploy to Hugging Face Space
 
 on:
   push:
-    branches: [ main ] 
+    branches: [ main ]  # change if your default branch isn't main
 
 jobs:
   deploy:
@@ -19,7 +19,7 @@ jobs:
       - name: Clone Space repo
         env:
           HF_TOKEN: ${{ secrets.HF_SPACE }}
-          SPACE_ID: ${{ vars.SPACE_ID }}  
+          SPACE_ID: ${{ vars.SPACE_ID }}   # must match the variable name you created
         run: |
           git clone https://oauth2:${HF_TOKEN}@huggingface.co/spaces/${SPACE_ID} space_repo
 
@@ -39,5 +39,6 @@ jobs:
             git commit -m "Deploy from GitHub Actions"
             git push
           fi
+
 
 
