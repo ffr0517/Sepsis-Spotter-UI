@@ -283,16 +283,4 @@ with gr.Blocks(fill_height=True) as demo:
 
 # ---- Launch settings: Spaces vs local ---------------------------------
 # ---- Auth via function (avoids proxy/basic-auth loops on Spaces) ----
-SPACE_USER = os.getenv("SPACE_USER", "user")   # set in Space → Settings → Variables & secrets
-SPACE_PASS = os.getenv("SPACE_PASS", "pass")
-
-def auth_fn(username, password):
-    return (username == SPACE_USER) and (password == SPACE_PASS)
-
-ON_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("SYSTEM") == "spaces")
-
-if ON_SPACES:
-    # Let Spaces handle host/port; disable SSR to avoid i18n issue
-    demo.launch(auth=auth_fn, ssr_mode=False)
-else:
-    demo.launch(server_name="127.0.0.1", server_port=7860, auth=auth_fn)
+demo.launch() 
