@@ -1,5 +1,12 @@
 import os, re, json, time, requests, gradio as gr
 
+import logging, sys
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
+                    handlers=[logging.StreamHandler(sys.stdout)])
+log = logging.getLogger("sepsis-agent")
+
+DEBUG_AGENT = bool(int(os.getenv("DEBUG_AGENT", "0")))
+
 # ---- Optional tiny LLM for parsing/orchestration (CPU/Spaces) ----
 USE_LLM_DEFAULT = True  # default for the UI checkbox
 MODEL_ID = os.getenv("LLM_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")  # tiny & fast on CPU
@@ -216,16 +223,23 @@ def call_s2(features):
 # Agent helpers (LLM orchestrator)
 # --------------------------------
 def _coerce_json(s: str) -> dict:
-    """
-    Extract the last {...} block and parse as JSON. Tolerant to prompt echoing.
-    """
-    m = re.search(r"\{[\s\S]*\}\s*$", s)
-    if not m:
+    if not s:
         return {}
-    try:
-        return json.loads(m.group(0))
-    except Exception:
-        return {}
+    # Prefer content between our explicit tags
+    m = re.search(r"<<<JSON>\s*(\{[\s\S]*?\})\s*</JSON>>>", s)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    # Fallback: last {...} anywhere
+    candidates = re.findall(r"\{[\s\S]*?\}", s)
+    for chunk in reversed(candidates):
+        try:
+            return json.loads(chunk)
+        except Exception:
+            continue
+    return {}
 
 def agent_step(user_text: str, sheet: dict | None):
     """
@@ -241,15 +255,24 @@ def agent_step(user_text: str, sheet: dict | None):
         "note": "Reply with exactly one JSON command per the contract."
     }
     prompt = (
-        AGENT_SYSTEM +
-        "\n\n--- CONTEXT ---\n" +
-        json.dumps(context, indent=2) +
-        "\n\n--- USER ---\n" +
-        (user_text or "").strip() +
-        "\n\n--- COMMAND JSON ---\n"
+        AGENT_SYSTEM
+        + "\n\n--- CONTEXT ---\n"
+        + json.dumps(context, indent=2)
+        + "\n\n--- USER ---\n"
+        + (user_text or "").strip()
+        + "\n\n<<<JSON>\n"  # open the JSON block so the model fills it
     )
-    out = pipe(prompt)[0]["generated_text"]
-    return _coerce_json(out)
+
+    out = pipe(prompt, max_new_tokens=240, do_sample=False)[0]["generated_text"]
+    if DEBUG_AGENT:
+        log.info("[AGENT RAW OUTPUT]\n%s\n[/AGENT RAW OUTPUT]", out)
+
+    cmd = _coerce_json(out)
+
+    if DEBUG_AGENT:
+        log.info("[AGENT PARSED CMD]\n%s", json.dumps(cmd, indent=2) if cmd else "(none)")
+
+    return cmd
 
 def merge_features(sheet, feats):
     return merge_sheet(
