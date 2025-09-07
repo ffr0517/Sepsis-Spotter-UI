@@ -1,2 +1,6 @@
 gradio>=4.0
 requests>=2.31
+transformers>=4.44
+accelerate>=0.33
+sentencepiece
+safetensors
