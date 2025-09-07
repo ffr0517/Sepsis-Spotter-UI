@@ -281,5 +281,13 @@ with gr.Blocks(fill_height=True) as demo:
     )
     merge_btn.click(on_merge, [state, paste], [state, tips, info])
 
-# Password gate (change these before deploying!)
-demo.launch(server_name="0.0.0.0", server_port=7860, auth=("user","pass"))
+# ---- Launch settings: Spaces vs local ---------------------------------
+ON_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("SYSTEM") == "spaces")
+
+if ON_SPACES:
+    # On Hugging Face Spaces, do NOT set server_name/port/share.
+    # Disable experimental SSR to avoid svelte-i18n locale errors.
+    demo.launch(auth=("user", "pass"), ssr_mode=False)
+else:
+    # Local dev: bind to loopback explicitly
+    demo.launch(server_name="127.0.0.1", server_port=7860, auth=("user", "pass"))
