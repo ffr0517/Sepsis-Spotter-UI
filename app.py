@@ -1,27 +1,39 @@
 import os, re, json, time, requests, gradio as gr
 
-# ---- Optional tiny LLM for parsing (CPU) ----
-USE_LLM = False
+# ---- Optional tiny LLM for parsing (CPU/Spaces) ----
+USE_LLM_DEFAULT = True  # default for the UI checkbox
+MODEL_ID = os.getenv("LLM_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")  # tiny & fast on CPU
 _llm_pipe = None
 
 def _load_tiny_llm():
+    """
+    Lazy-load a very small instruct model suitable for CPU (Spaces Basic).
+    """
     global _llm_pipe
     if _llm_pipe is not None:
         return _llm_pipe
     try:
         from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-        model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-        tok = AutoTokenizer.from_pretrained(model_id)
-        mdl = AutoModelForCausalLM.from_pretrained(model_id)
+        import torch
+
+        tok = AutoTokenizer.from_pretrained(MODEL_ID)
+        mdl = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32,       # safe on CPU
+            low_cpu_mem_usage=True,
+        )
         _llm_pipe = pipeline(
             "text-generation",
             model=mdl,
             tokenizer=tok,
-            # keep it small for CPU
-            max_new_tokens=256,
-            do_sample=False,
-            temperature=0.0,
+            max_new_tokens=128,             # keep it tight for speed
+            do_sample=False,                # deterministic; no temperature needed
         )
+        # Pre-warm a touch so first real call is faster
+        try:
+            _llm_pipe("{}", max_new_tokens=1)
+        except Exception:
+            pass
         return _llm_pipe
     except Exception as e:
         print("LLM load failed, falling back to regex:", e)
@@ -32,40 +44,49 @@ SYSTEM_PROMPT = (
     "You are a clinical intake assistant. Extract only structured fields needed for a sepsis risk model.\n"
     "Return STRICT JSON with keys:\n"
     "{\n"
-    '  "clinical": {\n'
-    '    "age.months": <number>, "sex": <0 for male, 1 for female>, "hr.all": <int>,\n'
-    '    "rr.all": <int>, "oxy.ra": <int>, ... (optional extras)\n'
+    '  \"clinical\": {\n'
+    '    \"age.months\": <number>, \"sex\": <0 for male, 1 for female>, \"hr.all\": <int>,\n'
+    '    \"rr.all\": <int>, \"oxy.ra\": <int>\n'
     "  },\n"
-    '  "labs": { "CRP": <number>, "PCT": <number>, "Lactate": <number>, "WBC": <number>, "Neutrophils": <number>, "Platelets": <number> }\n'
+    '  \"labs\": { \"CRP\": <number>, \"PCT\": <number>, \"Lactate\": <number>, \"WBC\": <number>, \"Neutrophils\": <number>, \"Platelets\": <number> }\n'
     "}\n"
     "Rules:\n"
     "- Convert years to months.\n"
     "- For sex, map male/boy→0, female/girl→1.\n"
-    "- If a value is missing, omit the key (do not invent values).\n"
+    "- If a value is missing, omit the key. Do not invent values.\n"
     "- Output ONLY JSON. No commentary.\n"
 )
 
-def llm_extract_to_dict(user_text: str) -> dict:
-    if not USE_LLM:
-        return {}
+# Safe call with timeout + JSON extraction
+def llm_extract_to_dict(user_text: str, timeout_s: int = 15) -> dict:
+    """
+    Run a small LLM to extract structured fields.
+    If anything goes wrong or times out, return {} so regex can fill gaps.
+    """
     pipe = _load_tiny_llm()
     if pipe is None:
         return {}
-    prompt = (
-        SYSTEM_PROMPT
-        + "\n\nUser text:\n"
-        + user_text.strip()
-        + "\n\nJSON:"
-    )
-    out = pipe(prompt)[0]["generated_text"]
-    # Try to locate a JSON object in the output
-    import re, json
-    m = re.search(r"\{[\s\S]*\}\s*$", out)
-    if not m:
-        return {}
+
+    import concurrent.futures, re, json
+
+    prompt = f"{SYSTEM_PROMPT}\n\nUser text:\n{(user_text or '').strip()}\n\nJSON:"
+
+    def _call():
+        out = pipe(prompt)[0]["generated_text"]
+        m = re.search(r"\{[\s\S]*\}\s*$", out)
+        if not m:
+            return {}
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return {}
+
     try:
-        return json.loads(m.group(0))
-    except Exception:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_call)
+            return fut.result(timeout=timeout_s)
+    except Exception as _:
+        # Timeout or any other error → graceful fallback
         return {}
 
 
@@ -173,14 +194,13 @@ def call_s2(features):
 # --------------------------------
 # Orchestration
 # --------------------------------
-def run_pipeline(state, user_text, stage="auto"):
-    # 1) Try LLM extraction
-    blob = llm_extract_to_dict(user_text or "")
+def run_pipeline(state, user_text, stage="auto", use_llm: bool = USE_LLM_DEFAULT):
+    # 1) Try LLM extraction (optional)
+    blob = llm_extract_to_dict(user_text or "") if use_llm else {}
     clin_new = (blob.get("clinical") or {}) if isinstance(blob, dict) else {}
 
     # 2) Fallback to regex for anything missing
     rx_clin, rx_labs, _ = extract_features(user_text or "")
-    # Merge (LLM has priority; regex fills gaps)
     for k, v in rx_clin.items():
         if k not in clin_new:
             clin_new[k] = v
