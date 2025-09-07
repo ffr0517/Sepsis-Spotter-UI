@@ -283,4 +283,11 @@ with gr.Blocks(fill_height=True) as demo:
 
 # ---- Launch settings: Spaces vs local ---------------------------------
 # ---- Auth via function (avoids proxy/basic-auth loops on Spaces) ----
-demo.launch() 
+IS_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID") or os.getenv("SYSTEM") == "spaces")
+
+if IS_SPACES:
+    # On Hugging Face Spaces: don't set host/port/share; disable SSR to avoid locale/i18n issues.
+    demo.launch(ssr_mode=False)
+else:
+    # Local development
+    demo.launch(server_name="127.0.0.1", server_port=7860)
