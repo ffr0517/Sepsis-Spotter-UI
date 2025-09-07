@@ -226,68 +226,94 @@ def run_pipeline(state, user_text, stage="auto"):
         return state, f"Error calling API: {e}"
 
 # --------------------------------
-# Gradio UI
+# In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
 # --------------------------------
-with gr.Blocks(fill_height=True) as demo:
-    gr.Markdown("### Spot Sepsis — Research Preview *(Not medical advice)*")
-    with gr.Row():
-        with gr.Column(scale=3):
-            chat = gr.Chatbot(height=420, type="tuples")
-            msg = gr.Textbox(placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')", lines=3)
-            with gr.Row():
-                btn_s1 = gr.Button("Run S1")
-                btn_s2 = gr.Button("Run S2 (with labs)")
-                btn_auto = gr.Button("Auto")
-        with gr.Column(scale=2):
-            info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
-            paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
-            merge_btn = gr.Button("Merge")
-            tips = gr.Markdown("")
+SPACE_USER = os.getenv("SPACE_USER", "user")   # set in HF Space → Settings → Variables & secrets
+SPACE_PASS = os.getenv("SPACE_PASS", "pass")
 
-    state = gr.State({"sheet": None})
-
-    def on_user_send(history, text):
-        history = history + [(text, None)]
-        return history, ""
-
-    def on_bot_reply(history, st, stage):
-        st, reply = run_pipeline(st, history[-1][0], stage)
-        history[-1] = (history[-1][0], reply)
-        info_json = json.dumps(st["sheet"], indent=2) if st.get("sheet") else ""
-        return history, st, info_json, ""
-
-    def on_merge(st, pasted):
-        try:
-            blob = json.loads(pasted)
-        except Exception:
-            return st, "Could not parse pasted JSON.", ""
-        if st.get("sheet"):
-            st["sheet"] = merge_sheet(st["sheet"], blob.get("features", {}).get("clinical", {}), blob.get("features", {}).get("labs", {}))
-        else:
-            st["sheet"] = blob
-        return st, "Merged.", json.dumps(st["sheet"], indent=2)
-
-    msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
-        on_bot_reply, [chat, state, gr.State("auto")], [chat, state, info, msg]
+def check_login(u, p):
+    ok = (u == SPACE_USER) and (p == SPACE_PASS)
+    # Hide login, show app if ok; otherwise show error
+    return (
+        gr.update(visible=not ok),   # login_view
+        gr.update(visible=ok),       # app_view
+        ("" if ok else "Invalid username or password.")
     )
-    btn_s1.click(on_user_send, [chat, msg], [chat, msg]).then(
-        on_bot_reply, [chat, state, gr.State("S1")], [chat, state, info, msg]
-    )
-    btn_s2.click(on_user_send, [chat, msg], [chat, msg]).then(
-        on_bot_reply, [chat, state, gr.State("S2")], [chat, state, info, msg]
-    )
-    btn_auto.click(on_user_send, [chat, msg], [chat, msg]).then(
-        on_bot_reply, [chat, state, gr.State("auto")], [chat, state, info, msg]
-    )
-    merge_btn.click(on_merge, [state, paste], [state, tips, info])
+
+with gr.Blocks(fill_height=True) as ui:
+    # ---- Login view ----
+    with gr.Group(visible=True) as login_view:
+        gr.Markdown("#### 🔒 Sign in")
+        u = gr.Textbox(label="Username", autofocus=True)
+        p = gr.Textbox(label="Password", type="password")
+        login_btn = gr.Button("Enter")
+        login_msg = gr.Markdown("")
+
+    # ---- App view (hidden until login succeeds) ----
+    with gr.Group(visible=False) as app_view:
+        gr.Markdown("### Spot Sepsis — Research Preview *(Not medical advice)*")
+        with gr.Row():
+            with gr.Column(scale=3):
+                chat = gr.Chatbot(height=420, type="tuples")
+                msg = gr.Textbox(placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')", lines=3)
+                with gr.Row():
+                    btn_s1 = gr.Button("Run S1")
+                    btn_s2 = gr.Button("Run S2 (with labs)")
+                    btn_auto = gr.Button("Auto")
+            with gr.Column(scale=2):
+                info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
+                paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
+                merge_btn = gr.Button("Merge")
+                tips = gr.Markdown("")
+
+        state = gr.State({"sheet": None})
+
+        def on_user_send(history, text):
+            history = history + [(text, None)]
+            return history, ""
+
+        def on_bot_reply(history, st, stage):
+            st, reply = run_pipeline(st, history[-1][0], stage)
+            history[-1] = (history[-1][0], reply)
+            info_json = json.dumps(st["sheet"], indent=2) if st.get("sheet") else ""
+            return history, st, info_json, ""
+
+        def on_merge(st, pasted):
+            try:
+                blob = json.loads(pasted)
+            except Exception:
+                return st, "Could not parse pasted JSON.", ""
+            if st.get("sheet"):
+                st["sheet"] = merge_sheet(
+                    st["sheet"],
+                    blob.get("features", {}).get("clinical", {}),
+                    blob.get("features", {}).get("labs", {})
+                )
+            else:
+                st["sheet"] = blob
+            return st, "Merged.", json.dumps(st["sheet"], indent=2)
+
+        msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
+            on_bot_reply, [chat, state, gr.State("auto")], [chat, state, info, msg]
+        )
+        btn_s1.click(on_user_send, [chat, msg], [chat, msg]).then(
+            on_bot_reply, [chat, state, gr.State("S1")], [chat, state, info, msg]
+        )
+        btn_s2.click(on_user_send, [chat, msg], [chat, msg]).then(
+            on_bot_reply, [chat, state, gr.State("S2")], [chat, state, info, msg]
+        )
+        btn_auto.click(on_user_send, [chat, msg], [chat, msg]).then(
+            on_bot_reply, [chat, state, gr.State("auto")], [chat, state, info, msg]
+        )
+        merge_btn.click(on_merge, [state, paste], [state, tips, info])
+
+    # Wire the login button
+    login_btn.click(check_login, [u, p], [login_view, app_view, login_msg])
 
 # ---- Launch settings: Spaces vs local ---------------------------------
-# ---- Auth via function (avoids proxy/basic-auth loops on Spaces) ----
 IS_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID") or os.getenv("SYSTEM") == "spaces")
-
 if IS_SPACES:
-    # On Hugging Face Spaces: don't set host/port/share; disable SSR to avoid locale/i18n issues.
-    demo.launch(ssr_mode=False)
+    # On Spaces: let proxy choose host/port; disable SSR to avoid locale/i18n issues.
+    ui.launch(ssr_mode=False)
 else:
-    # Local development
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    ui.launch(server_name="127.0.0.1", server_port=7860)
