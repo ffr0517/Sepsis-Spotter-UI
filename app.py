@@ -9,7 +9,7 @@ DEBUG_AGENT = bool(int(os.getenv("DEBUG_AGENT", "0")))
 
 # ---- Optional tiny LLM for parsing/orchestration (CPU/Spaces) ----
 USE_LLM_DEFAULT = True  # default for the UI checkbox
-MODEL_ID = os.getenv("LLM_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")  # tiny & fast on CPU
+MODEL_ID = os.getenv("LLM_MODEL_ID", "Qwen/Qwen2.5-1.5B-Instruct")  # tiny & fast on CPU
 _llm_pipe = None
 
 def _load_tiny_llm():
