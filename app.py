@@ -248,6 +248,54 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             return state, "Unknown stage."
     except Exception as e:
         return state, f"Error calling API: {e}"
+    
+def run_pipeline(state, user_text, stage="auto", use_llm=True):
+    state.setdefault("sheet", None)
+    state.setdefault("conv_id", None)
+
+    if use_llm:
+        say, cmd, conv_id = agent_step(user_text, state["sheet"], state["conv_id"])
+        state["conv_id"] = conv_id
+
+        # If the model just talks (no tool call), show its message
+        if not cmd:
+            return state, (say or "…")
+
+        action = cmd.get("action")
+
+        if action == "update_sheet":
+            state["sheet"] = merge_features(state.get("sheet") or new_sheet(), cmd.get("features"))
+            return state, (cmd.get("message") or say or "")
+
+        if action == "ask":
+            return state, (cmd.get("message") or say or "")
+
+        if action == "call_api":
+            fs = cmd.get("features") or {}
+            stage_req = cmd.get("stage") or "auto"
+            sheet = merge_features(state.get("sheet") or new_sheet(), fs)
+            if stage_req == "auto":
+                stage_req = "S2" if sheet["features"]["labs"] else "S1"
+            try:
+                if stage_req == "S1":
+                    s1 = call_s1(sheet["features"]["clinical"])
+                    sheet["s1"] = s1
+                    state["sheet"] = sheet
+                    return state, f"{cmd.get('message') or say or ''}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+                else:
+                    features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
+                    s2 = call_s2(features)
+                    sheet["s2"] = s2
+                    state["sheet"] = sheet
+                    return state, f"{cmd.get('message') or say or ''}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+            except Exception as e:
+                return state, f"{cmd.get('message') or say or ''}\n\nError calling API: {e}"
+
+        # Unknown action → just show the assistant text
+        return state, (say or "")
+
+    # toggle off → legacy regex path
+    return run_pipeline_legacy(state, user_text, stage)
 
 # --------------------------------
 # In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
