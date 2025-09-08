@@ -17,13 +17,43 @@ USE_LLM_DEFAULT = True  # default for the UI checkbox
 # Agent system prompt (LLM is the orchestrator)
 # ------------------------------
 AGENT_SYSTEM = """
-You are SepsisAgent (research preview; not medical advice).
-- Greet and speak naturally (brief, friendly).
-- Collect only the fields required for S1/S2; ask ONE question at a time when missing.
-- S1 needs: age.months, sex (0 male, 1 female), hr.all, rr.all, oxy.ra.
-- Prefer S2 if labs {CRP, PCT, Lactate, WBC, Neutrophils, Platelets} are present.
-- Convert years→months; map sex male/boy→0, female/girl→1; do not invent values.
-- When you want to take an action, CALL the tool `sepsis_command` with action + message + features (and optional stage).
+You are the experimental LLM front-end of **Sepsis Spotter** (research preview; not medical advice).
+
+Goal:
+- Converse briefly and clearly.
+- Collect required fields ONE AT A TIME.
+- Never invent values. If unsure, ASK.
+- When appropriate, emit exactly one function call to `sepsis_command`.
+
+Decision rules:
+- S1 requires: clinical.age.months, clinical.sex (0 male, 1 female), clinical.hr.all, clinical.rr.all, clinical.oxy.ra.
+- Prefer S2 **only** when at least one lab among {CRP, PCT, Lactate, WBC, Neutrophils, Platelets} is present.
+- Convert years→months; map male/boy→0, female/girl→1.
+- Range-check gently; if a value looks implausible, ask to confirm.
+
+Behavior:
+- If required fields are missing: CALL `sepsis_command` with {"action":"ask","message":<one concise question>} targeting `next_required`.
+- If the user provides any values: CALL `sepsis_command` with {"action":"update_sheet","features":{...},"message":<brief ack>}.
+- When all required fields are present:
+  • If labs exist → stage "S2"; otherwise "S1".
+  • CALL `sepsis_command` with {"action":"call_api","stage":"S1|S2","features":{...},"message":"Running S1|S2 now."}
+
+Tone: warm, efficient, clinical.
+
+Examples (illustrative):
+
+User: "hello"
+→ CALL sepsis_command: {"action":"ask","message":"Hi! To start, how old is the child (in months)?"}
+
+User: "2 years old"
+→ CALL sepsis_command: {"action":"update_sheet","features":{"clinical":{"age.months":24}},"message":"Noted age 24 months. What is the child's sex? (male=0, female=1)"}
+
+User: "male, HR 150"
+→ CALL sepsis_command: {"action":"update_sheet","features":{"clinical":{"sex":0,"hr.all":150}},"message":"Thanks. What's the respiratory rate (breaths/min)?"}
+
+(…continue asking for rr.all then oxy.ra; when all present…)
+
+→ CALL sepsis_command: {"action":"call_api","stage":"S1","features":{"clinical":{...}},"message":"Thanks — I have the essentials. Running S1 now."}
 """
 
 TOOL_SPEC = [{
@@ -159,13 +189,9 @@ def _get_llm_model():
         return "gpt-4o-mini"
     return m
 
-def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
-    """
-    Ask the model to chat naturally AND optionally emit a structured tool call.
-    Returns: (say_text, cmd_dict_or_None, new_conv_id)
-    """
+def agent_step(user_text: str, sheet: dict | None, conv_id: str | None, checklist: dict | None = None):
     sheet = sheet or new_sheet()
-    context = {"sheet": sheet}
+    context = {"sheet": sheet, "checklist": checklist or {}}
 
     input_msgs = [
         {
@@ -183,30 +209,28 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         },
     ]
 
-    tools = [
-        {
-            "type": "function",
-            "name": "sepsis_command",
-            "description": "Single structured command: ask user, update sheet, or call API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
-                    "message": {"type": "string"},
-                    "features": {
-                        "type": "object",
-                        "properties": {
-                            "clinical": {"type": "object", "additionalProperties": True},
-                            "labs": {"type": "object", "additionalProperties": True},
-                        },
-                    },
-                    "stage": {"type": "string", "enum": ["auto", "S1", "S2"]},
+    tools = [{
+        "type": "function",
+        "name": "sepsis_command",
+        "description": "Single structured command: ask user, update sheet, or call API.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
+                "message": {"type": "string"},
+                "features": {
+                    "type": "object",
+                    "properties": {
+                        "clinical": {"type": "object", "additionalProperties": True},
+                        "labs": {"type": "object", "additionalProperties": True}
+                    }
                 },
-                "required": ["action"],
-                "additionalProperties": False,
+                "stage": {"type": "string", "enum": ["auto","S1","S2"]}
             },
+            "required": ["action"],
+            "additionalProperties": False
         }
-    ]
+    }]
 
     resp = client.responses.create(
         model=_get_llm_model(),
@@ -311,54 +335,110 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             return state, "Unknown stage."
     except Exception as e:
         return state, f"Error calling API: {e}"
-    
+
+def plausible_from_text(text, k, v):
+    # very light check: does a number appear that matches v?
+    if isinstance(v, (int, float)):
+        return re.search(rf"\b{int(v)}\b", text or "") is not None
+    if k == "sex":
+        return bool(re.search(r"\b(male|boy|female|girl)\b", text or "", re.I))
+    return True
+
 def run_pipeline(state, user_text, stage="auto", use_llm=True):
+    # --- init state ---
     state.setdefault("sheet", None)
     state.setdefault("conv_id", None)
 
-    if use_llm:
-        say, cmd, conv_id = agent_step(user_text, state["sheet"], state["conv_id"])
-        state["conv_id"] = conv_id
+    # utility: next question for a missing field
+    qmap = {
+        "age.months": "How old is the child (in months)?",
+        "sex": "What is the child's sex? (male=0, female=1)",
+        "hr.all": "What is the heart rate (beats per minute)?",
+        "rr.all": "What is the respiratory rate (breaths per minute)?",
+        "oxy.ra": "What is the oxygen saturation on room air (SpO₂ %)?",
+    }
 
-        # If the model just talks (no tool call), show its message
-        if not cmd:
-            return state, (say or "…")
+    if not use_llm:
+        # toggle off → legacy regex path
+        return run_pipeline_legacy(state, user_text, stage)
 
-        action = cmd.get("action")
+    # --- compute checklist for this turn and pass it to the model ---
+    sheet = state.get("sheet") or new_sheet()
+    missing_req, _warns = validate_complete(sheet["features"]["clinical"])
+    labs_present = [k for k in LAB_KEYS if k in (sheet["features"]["labs"] or {})]
+    next_required = missing_req[0] if missing_req else None
+    state["sheet"] = sheet
 
-        if action == "update_sheet":
-            state["sheet"] = merge_features(state.get("sheet") or new_sheet(), cmd.get("features"))
-            return state, (cmd.get("message") or say or "")
+    say, cmd, conv_id = agent_step(
+        user_text=user_text,
+        sheet=state["sheet"],
+        conv_id=state["conv_id"],
+        checklist={"missing_required": missing_req,
+                   "labs_present": labs_present,
+                   "next_required": next_required}
+    )
+    state["conv_id"] = conv_id
 
-        if action == "ask":
-            return state, (cmd.get("message") or say or "")
+    # If the model just talks (no tool call), show its message
+    if not cmd:
+        return state, (say or "…")
 
-        if action == "call_api":
-            fs = cmd.get("features") or {}
-            stage_req = cmd.get("stage") or "auto"
-            sheet = merge_features(state.get("sheet") or new_sheet(), fs)
-            if stage_req == "auto":
-                stage_req = "S2" if sheet["features"]["labs"] else "S1"
-            try:
-                if stage_req == "S1":
-                    s1 = call_s1(sheet["features"]["clinical"])
-                    sheet["s1"] = s1
-                    state["sheet"] = sheet
-                    return state, f"{cmd.get('message') or say or ''}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
-                else:
-                    features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
-                    s2 = call_s2(features)
-                    sheet["s2"] = s2
-                    state["sheet"] = sheet
-                    return state, f"{cmd.get('message') or say or ''}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
-            except Exception as e:
-                return state, f"{cmd.get('message') or say or ''}\n\nError calling API: {e}"
+    action = cmd.get("action")
 
-        # Unknown action → just show the assistant text
-        return state, (say or "")
+    # --- UPDATE SHEET ---
+    if action == "update_sheet":
+        feats = cmd.get("features") or {}
+        state["sheet"] = merge_features(state.get("sheet") or new_sheet(), feats)
 
-    # toggle off → legacy regex path
-    return run_pipeline_legacy(state, user_text, stage)
+        # After updating, compute what's still missing and auto-ask next if the model didn't.
+        missing_after, _ = validate_complete(state["sheet"]["features"]["clinical"])
+        follow = (cmd.get("message") or say or "").strip()
+        if missing_after:
+            nxt = missing_after[0]
+            if "?" not in follow:  # model didn't include a next question
+                follow = (follow + ("\n\n" if follow else "")) + qmap.get(nxt, "What’s the next missing field?")
+        return state, (follow or "OK")
+
+    # --- ASK ---
+    if action == "ask":
+        return state, (cmd.get("message") or say or "")
+
+    # --- CALL API ---
+    if action == "call_api":
+        fs = cmd.get("features") or {}
+        # Merge any last-second features the model provided
+        working_sheet = merge_features(state.get("sheet") or new_sheet(), fs)
+
+        # Decide stage from data (don’t rely on model)
+        have_labs = bool(working_sheet["features"]["labs"])
+        stage_req = "S2" if have_labs else "S1"
+
+        # Validate S1 minimums before calling
+        missing_now, _ = validate_complete(working_sheet["features"]["clinical"])
+        if stage_req == "S1" and missing_now:
+            ask = qmap.get(missing_now[0], "I need one more value.")
+            return state, f"I still need: {', '.join(missing_now)}.\n\n{ask}"
+
+        try:
+            if stage_req == "S1":
+                s1 = call_s1(working_sheet["features"]["clinical"])
+                working_sheet["s1"] = s1
+                state["sheet"] = working_sheet
+                prefix = (cmd.get("message") or say or "Running S1…").strip()
+                return state, f"{prefix}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(working_sheet, indent=2)}\n```"
+            else:
+                features = {**working_sheet["features"]["clinical"], **working_sheet["features"]["labs"]}
+                s2 = call_s2(features)
+                working_sheet["s2"] = s2
+                state["sheet"] = working_sheet
+                prefix = (cmd.get("message") or say or "Running S2…").strip()
+                return state, f"{prefix}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(working_sheet, indent=2)}\n```"
+        except Exception as e:
+            prefix = (cmd.get("message") or say or "").strip()
+            return state, f"{prefix}\n\nError calling API: {e}"
+
+    # Unknown action → just show the assistant text
+    return state, (say or "")
 
 # --------------------------------
 # In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
