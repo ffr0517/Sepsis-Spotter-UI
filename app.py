@@ -153,6 +153,13 @@ def call_s2(features):
 # --------------------------------
 # Agent helpers (LLM orchestrator)
 # --------------------------------
+def _get_llm_model():
+    # Prefer env; fall back to a good default
+    m = os.getenv("LLM_MODEL_ID", "").strip()
+    # If someone mistakenly sets a HF model name (has a slash), force our default
+    if not m or "/" in m:
+        return "gpt-4o-mini"
+    return m
 
 def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     """
@@ -172,12 +179,12 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     ]
 
     resp = client.responses.create(
-        model=os.getenv("LLM_MODEL_ID", "gpt-4o-mini"),
-        input=input_msgs,          # ✅ correct shape
-        tools=TOOL_SPEC,           # your function tool spec is fine
-        conversation=conv_id,      # None on first turn; Responses will create one
-        temperature=0,
-    )
+    model=_get_llm_model(),
+    input=input_items,
+    tools=TOOL_SPEC,
+    conversation=conv_id,
+    temperature=0
+)
 
     say = ""
     cmd = None
