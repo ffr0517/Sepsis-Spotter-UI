@@ -293,6 +293,8 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None, checklis
             log.info("[RESPONSES RAW] %s", resp)
         log.info("[RESPONSES SAY] %s", (say or "").strip())
         log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
+        log.info("[SHEET] %s", json.dumps(state["sheet"], indent=2))
+
 
     return (say.strip() or None), cmd, new_conv_id
 
@@ -344,6 +346,14 @@ def plausible_from_text(text, k, v):
         return bool(re.search(r"\b(male|boy|female|girl)\b", text or "", re.I))
     return True
 
+def merge_features(sheet, feats):
+    return merge_sheet(
+        sheet,
+        (feats or {}).get("clinical", {}) or {},
+        (feats or {}).get("labs", {}) or {},
+    )
+
+
 def run_pipeline(state, user_text, stage="auto", use_llm=True):
     # --- init state ---
     state.setdefault("sheet", None)
@@ -388,6 +398,9 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
     # --- UPDATE SHEET ---
     if action == "update_sheet":
         feats = cmd.get("features") or {}
+        if not isinstance(feats, dict):
+            feats = {}
+
         state["sheet"] = merge_features(state.get("sheet") or new_sheet(), feats)
 
         # After updating, compute what's still missing and auto-ask next if the model didn't.
