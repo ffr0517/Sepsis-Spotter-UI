@@ -164,49 +164,52 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     sheet = sheet or new_sheet()
     context = {"sheet": sheet}
 
-    # User turn (keep system guidance in `instructions` below)
-    input_items = [
-        {"type": "input_text",
-         "text": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}"}
+    # ✅ Responses API expects messages (role + content), not "input_text" parts
+    input_msgs = [
+        {"role": "system", "content": AGENT_SYSTEM},
+        {
+            "role": "user",
+            "content": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}"
+        },
     ]
 
     resp = client.responses.create(
         model=os.getenv("LLM_MODEL_ID", "gpt-4o-mini"),
-        instructions=AGENT_SYSTEM,        # <-- better than passing as input
-        input=input_items,
-        tools=TOOL_SPEC,
-        conversation=conv_id,             # None on first turn; server creates one
+        input=input_msgs,          # ✅ correct shape
+        tools=TOOL_SPEC,           # your function tool spec is fine
+        conversation=conv_id,      # None on first turn; Responses will create one
         temperature=0,
-        tool_choice="auto"                # let the model call sepsis_command when needed
     )
 
     say = ""
     cmd = None
-    new_conv_id = resp.conversation.id if getattr(resp, "conversation", None) else None
+    # conversation is an object; keep id for next turn
+    new_conv_id = getattr(resp, "conversation", {}).get("id", None)
 
+    # Parse outputs: messages + tool calls
     for item in (resp.output or []):
-        # Assistant chat text
-        if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
-            for c in (item.content or []):
-                if getattr(c, "type", "") == "output_text":
-                    say += (c.text or "")
-
-        # Tool call from the model
-        if getattr(item, "type", "") == "tool_call" and getattr(item, "name", "") == "sepsis_command":
+        if item.get("type") == "message" and item.get("role") == "assistant":
+            # item["content"] is a list of parts; pick text parts
+            for c in (item.get("content") or []):
+                if c.get("type") == "output_text":
+                    say += c.get("text", "")
+        if item.get("type") == "tool_call" and item.get("name") == "sepsis_command":
             try:
-                cmd = json.loads(item.arguments or "{}")
+                cmd = json.loads(item.get("arguments") or "{}")
             except Exception:
                 cmd = None
 
     if DEBUG_AGENT:
         try:
-            log.info("[RESPONSES RAW]\n%s", resp.model_dump_json(indent=2))
+            # New SDK: model_dump_json may not exist on all objects; be defensive
+            log.info("[RESPONSES RAW] %s", getattr(resp, "model_dump_json", lambda **_: str(resp))())
         except Exception:
-            log.info("[RESPONSES RAW] (could not dump model json)")
+            log.info("[RESPONSES RAW] %s", str(resp))
         log.info("[RESPONSES SAY] %s", (say or "").strip())
         log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
 
     return (say.strip() or None), cmd, (new_conv_id or conv_id)
+
 
 
 
