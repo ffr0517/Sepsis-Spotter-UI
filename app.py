@@ -167,7 +167,6 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     sheet = sheet or new_sheet()
     context = {"sheet": sheet}
 
-    # Responses API expects items, not chat-style role/content pairs; use a system message + a user message.
     input_msgs = [
         {
             "type": "message",
@@ -184,7 +183,6 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         },
     ]
 
-    # Tools schema for Responses API (function tool)
     tools = [
         {
             "type": "function",
@@ -194,7 +192,7 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
-                    "message": {"type": "string", "description": "Short user-visible text/question."},
+                    "message": {"type": "string"},
                     "features": {
                         "type": "object",
                         "properties": {
@@ -212,27 +210,57 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
 
     resp = client.responses.create(
         model=_get_llm_model(),
-        input=input_msgs,           # <-- use input_msgs here
+        input=input_msgs,
         tools=tools,
-        conversation=conv_id,       # None on first turn; OpenAI creates one
+        conversation=conv_id,   # may be None on first turn
         temperature=0,
     )
 
+    # ---- Robustly get a conversation id (if any); otherwise keep what we had
+    new_conv_id = conv_id
+    try:
+        conv = getattr(resp, "conversation", None)
+        if conv:
+            # SDK can return a dict-like or typed object
+            if isinstance(conv, dict):
+                new_conv_id = conv.get("id") or new_conv_id
+            else:
+                new_conv_id = getattr(conv, "id", None) or new_conv_id
+    except Exception:
+        pass
+
+    # ---- Safely turn the response into a plain dict, then parse output items
+    try:
+        resp_dict = resp.model_dump()  # pydantic-ish
+    except Exception:
+        try:
+            resp_dict = json.loads(resp.model_dump_json())
+        except Exception:
+            # last resort
+            resp_dict = json.loads(str(resp))
+
     say = ""
     cmd = None
-    new_conv_id = getattr(resp, "conversation", {}).get("id", None)
-
-    for item in (resp.output or []):
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            for c in item.get("content", []):
+    for item in (resp_dict.get("output") or []):
+        itype = item.get("type", "")
+        # assistant text
+        if itype == "message" and item.get("role") == "assistant":
+            for c in (item.get("content") or []):
                 if c.get("type") == "output_text":
                     say += c.get("text", "")
 
-        if item.get("type") == "tool_call" and item.get("name") == "sepsis_command":
-            try:
-                cmd = json.loads(item.get("arguments") or "{}")
-            except Exception:
-                cmd = None
+        # function/tool call (Responses uses 'function_call')
+        if itype in ("function_call", "tool_call"):
+            name = item.get("name")
+            if name == "sepsis_command":
+                args = item.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        cmd = json.loads(args)
+                    except Exception:
+                        cmd = None
+                elif isinstance(args, dict):
+                    cmd = args
 
     if DEBUG_AGENT:
         try:
@@ -242,7 +270,8 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         log.info("[RESPONSES SAY] %s", (say or "").strip())
         log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
 
-    return (say.strip() or None), cmd, (new_conv_id or conv_id)
+    return (say.strip() or None), cmd, new_conv_id
+
 
 # --------------------------------
 # Orchestration (Agent-first when toggle ON)
