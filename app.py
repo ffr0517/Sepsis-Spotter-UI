@@ -8,9 +8,6 @@ log = logging.getLogger("sepsis-agent")
 from openai import OpenAI
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
-
-DEBUG_AGENT = bool(int(os.getenv("DEBUG_AGENT", "0")))
-
 USE_LLM_DEFAULT = True  # default for the UI checkbox
 
 # ------------------------------
@@ -169,16 +166,20 @@ def merge_sheet(sheet, add_clin, add_labs):
 # Model calls
 # --------------------------------
 def call_s1(clinical):
-    payload = {"features": clinical}
-    r = requests.post(API_S1, json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.post(API_S1, json={"features": clinical}, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise RuntimeError(f"S1 endpoint unavailable or returned an error: {e}") from e
 
 def call_s2(features):
-    payload = {"features": features}
-    r = requests.post(API_S2, json=payload, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    try:
+        r = requests.post(API_S2, json={"features": features}, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        raise RuntimeError(f"S2 endpoint unavailable or returned an error: {e}") from e
 
 # --------------------------------
 # Agent helpers (LLM orchestrator)
@@ -189,70 +190,6 @@ def _get_llm_model():
         return "gpt-4o-mini"
     return m
 
-def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
-    sheet = sheet or new_sheet()
-    context = {"sheet": sheet}
-
-    input_msgs = [
-        {"role": "system", "content": AGENT_SYSTEM},
-        {"role": "user", "content": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}"},
-    ]
-
-    resp = client.responses.create(
-        model=os.getenv("LLM_MODEL_ID", "gpt-4o-mini"),
-        input=[{"type": "message", "role": m["role"], "content": [{"type": "text", "text": m["content"]}]} for m in input_msgs],
-        tools=[{
-            "type": "function",
-            "name": "sepsis_command",
-            "description": "Single structured command: ask user, update sheet, or call API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["ask","update_sheet","call_api"]},
-                    "message": {"type": "string"},
-                    "features": {
-                        "type": "object",
-                        "properties": {
-                            "clinical": {"type": "object", "additionalProperties": True},
-                            "labs": {"type": "object", "additionalProperties": True},
-                        },
-                    },
-                    "stage": {"type": "string", "enum": ["auto","S1","S2"]},
-                },
-                "required": ["action"],
-                "additionalProperties": False,
-            },
-        }],
-        temperature=0,
-        # `conversation` can be omitted; Responses will still work fine statelessly.
-    )
-
-    say, cmd = "", None
-
-    # Text outputs (if the model chooses to talk)
-    for item in (resp.output or []):
-        if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
-            for c in (getattr(item, "content", []) or []):
-                if getattr(c, "type", "") in ("output_text", "input_text", "text"):
-                    say += (getattr(c, "text", "") or "")
-
-        # Tool call
-        if getattr(item, "type", "") in ("function_call", "tool_call") and getattr(item, "name", "") == "sepsis_command":
-            try:
-                cmd = json.loads(getattr(item, "arguments", "") or "{}")
-            except Exception:
-                cmd = None
-
-    if DEBUG_AGENT:
-        try:
-            log.info("[RESPONSES RAW]\n%s", resp.model_dump_json(indent=2))
-        except Exception:
-            log.info("[RESPONSES RAW] %s", resp)
-        log.info("[RESPONSES SAY] %s", say.strip())
-        log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
-        log.info("[SHEET] %s", json.dumps(sheet, indent=2))  # ✅ use local `sheet`
-
-    return (say.strip() or None), cmd, None  # we’re not using conversation IDs here
 
 
 # --------------------------------
@@ -294,6 +231,122 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
     except Exception as e:
         return state, f"Error calling API: {e}"
 
+def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
+    """
+    Applies a sepsis_command dict to state, returns (state, reply_text).
+    """
+    sheet = state.get("sheet") or new_sheet()
+
+    action = (cmd or {}).get("action")
+    message = (cmd or {}).get("message") or ""
+
+    if action == "ask":
+        # Just pass the model's concise question through
+        state["sheet"] = sheet
+        return state, (message or "Could you clarify one detail?")
+
+    if action == "update_sheet":
+        feats = (cmd or {}).get("features") or {}
+        sheet = merge_features(sheet, feats)
+        state["sheet"] = sheet
+
+        # If model didn't supply a next question, try to prompt for the next missing S1 field
+        missing, warnings = validate_complete(sheet["features"]["clinical"])
+        if stage_hint == "S1" or stage_hint == "auto":
+            if missing:
+                next_required = missing[0]
+                nxt = f"{message}\n\nCould you provide **{next_required}**?"
+            else:
+                nxt = message or "Thanks — I have the essentials."
+        else:
+            nxt = message or "Got it."
+
+        if warnings:
+            nxt += "\n\n⚠️ " + " ".join(warnings)
+
+        return state, nxt
+
+    if action == "call_api":
+        stage = (cmd or {}).get("stage") or "auto"
+        # Merge any features the tool call included
+        feats = (cmd or {}).get("features") or {}
+        sheet = merge_features(sheet, feats)
+        state["sheet"] = sheet
+
+        # Choose stage
+        if stage == "auto":
+            stage = "S2" if sheet["features"]["labs"] else "S1"
+
+        # Validate for S1
+        if stage == "S1":
+            missing, warnings = validate_complete(sheet["features"]["clinical"])
+            if missing:
+                return state, "Missing required fields for S1: " + ", ".join(missing) + "."
+
+            try:
+                s1 = call_s1(sheet["features"]["clinical"])
+                sheet["s1"] = s1
+                state["sheet"] = sheet
+                reply = (message or "Running S1 now.") + f"\n\n**S1 decision:** {s1.get('s1_decision')}"
+                return state, reply
+            except Exception as e:
+                return state, f"Error calling S1 API: {e}"
+
+        elif stage == "S2":
+            try:
+                features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
+                s2 = call_s2(features)
+                sheet["s2"] = s2
+                state["sheet"] = sheet
+                reply = (message or "Running S2 now.") + f"\n\n**S2 decision:** {s2.get('s2_decision')}"
+                return state, reply
+            except Exception as e:
+                return state, f"Error calling S2 API: {e}"
+
+        else:
+            return state, f"Unknown stage: {stage}"
+
+    # Fallback if the tool payload is malformed
+    state["sheet"] = sheet
+    return state, "I didn’t receive a valid action from the tool call."
+
+def run_pipeline(state, user_text, stage="auto", use_llm=True):
+    """
+    Entry used by the Gradio callbacks.
+    Returns (state, reply_text)
+    """
+    state = state or {"sheet": None, "conv_id": None}
+
+    if not use_llm:
+        # Legacy path (regex extraction + direct call)
+        return run_pipeline_legacy(state, user_text, stage=stage)
+
+    # Agent path
+    say, cmd, new_conv = agent_step(user_text, state.get("sheet"), state.get("conv_id"))
+    if new_conv:
+        state["conv_id"] = new_conv
+
+    # If the model spoke and did NOT issue a tool call, just echo its text
+    if cmd is None:
+        reply = say or "Ok."
+        # opportunistically extract from free text to keep the sheet fresh
+        clin_new, labs_new, _ = extract_features(user_text or "")
+        if clin_new or labs_new:
+            state["sheet"] = merge_sheet(state.get("sheet") or new_sheet(), clin_new, labs_new)
+        return state, reply
+
+    # If we got a tool call, apply it
+    state, reply = handle_tool_cmd(state, cmd, user_text, stage_hint=stage)
+
+    # Keep the sheet visible and helpful: append a compact JSON view
+    try:
+        info_json = json.dumps(state.get("sheet") or {}, indent=2)
+        reply = f"{reply}\n\n**Current Info Sheet:**\n```json\n{info_json}\n```"
+    except Exception:
+        pass
+
+    return state, reply
+
 def plausible_from_text(text, k, v):
     # very light check: does a number appear that matches v?
     if isinstance(v, (int, float)):
@@ -310,68 +363,88 @@ def merge_features(sheet, feats):
     )
 
 
-def run_pipeline(state, user_text, stage="auto", use_llm=True):
-    state.setdefault("sheet", None)
-    state.setdefault("conv_id", None)
+def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
+    """
+    Ask the model to chat naturally AND optionally emit a structured tool call.
+    Returns: (say_text, cmd_dict_or_None, new_conv_id)  # we don't use conv_id here
+    """
+    sheet = sheet or new_sheet()
+    context = {"sheet": sheet}
 
-    if use_llm:
-        say, cmd, _ = agent_step(user_text, state["sheet"], state["conv_id"])
+    # Messages: content entries must be "input_text" for inputs
+    input_items = [
+        {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": AGENT_SYSTEM}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}",
+            }],
+        },
+    ]
 
-        # If the model just talks (no tool call), show its message
-        if not cmd:
-            return state, (say or "…")
+    resp = client.responses.create(
+        model=_get_llm_model(), 
+        input=input_items,
+        tools=[{
+            "type": "function",
+            "name": "sepsis_command",
+            "description": "Single structured command: ask user, update sheet, or call API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
+                    "message": {"type": "string"},
+                    "features": {
+                        "type": "object",
+                        "properties": {
+                            "clinical": {"type": "object", "additionalProperties": True},
+                            "labs": {"type": "object", "additionalProperties": True},
+                        },
+                    },
+                    "stage": {"type": "string", "enum": ["auto", "S1", "S2"]},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        }],
+        temperature=0,
+        # conversation=conv_id,  # optional; omit unless you really want server-side memory
+    )
 
-        action = cmd.get("action")
-        feats = cmd.get("features") or {}
-        if not isinstance(feats, dict):
-            feats = {}
+    say, cmd = "", None
+    new_conv_id = getattr(resp, "conversation", None).id if getattr(resp, "conversation", None) else None
 
-        if action == "update_sheet":
-            state["sheet"] = merge_sheet(
-                state.get("sheet") or new_sheet(),
-                feats.get("clinical", {}) or {},
-                feats.get("labs", {}) or {},
-            )
-            return state, (cmd.get("message") or say or "")
+    for item in (resp.output or []):
+        # Assistant talkback comes as "message" with "output_text"
+        if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
+            for c in (getattr(item, "content", []) or []):
+                if getattr(c, "type", "") == "output_text":
+                    say += (getattr(c, "text", "") or "")
 
-        if action == "ask":
-            return state, (cmd.get("message") or say or "")
-
-        if action == "call_api":
-            # Merge any features the model included right before the call
-            sheet = merge_sheet(
-                state.get("sheet") or new_sheet(),
-                feats.get("clinical", {}) or {},
-                feats.get("labs", {}) or {},
-            )
-
-            stage_req = (cmd.get("stage") or "auto")
-            if stage_req == "auto":
-                stage_req = "S2" if sheet["features"]["labs"] else "S1"
-
+        # Tool call (function call)
+        if getattr(item, "type", "") in ("function_call", "tool_call") and getattr(item, "name", "") == "sepsis_command":
             try:
-                if stage_req == "S1":
-                    missing, _ = validate_complete(sheet["features"]["clinical"])
-                    if missing:
-                        return state, "Missing required fields for S1: " + ", ".join(missing) + "."
-                    s1 = call_s1(sheet["features"]["clinical"])
-                    sheet["s1"] = s1
-                    state["sheet"] = sheet
-                    return state, f"{cmd.get('message') or say or ''}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
-                else:
-                    features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
-                    s2 = call_s2(features)
-                    sheet["s2"] = s2
-                    state["sheet"] = sheet
-                    return state, f"{cmd.get('message') or say or ''}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
-            except Exception as e:
-                return state, f"{cmd.get('message') or say or ''}\n\nError calling API: {e}"
+                cmd = json.loads(getattr(item, "arguments", "") or "{}")
+            except Exception:
+                cmd = None
 
-        # Unknown action → just show the assistant text
-        return state, (say or "")
+    if DEBUG_AGENT:
+        try:
+            log.info("[RESPONSES RAW]\n%s", resp.model_dump_json(indent=2))
+        except Exception:
+            log.info("[RESPONSES RAW] %s", resp)
+        log.info("[RESPONSES SAY] %s", say.strip())
+        log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
+        log.info("[SHEET] %s", json.dumps(sheet, indent=2))
 
-    # toggle off → legacy regex path
-    return run_pipeline_legacy(state, user_text, stage)
+    return (say.strip() or None), cmd, (new_conv_id or conv_id)
+
 
 # --------------------------------
 # In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
