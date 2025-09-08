@@ -189,114 +189,70 @@ def _get_llm_model():
         return "gpt-4o-mini"
     return m
 
-def agent_step(user_text: str, sheet: dict | None, conv_id: str | None, checklist: dict | None = None):
+def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     sheet = sheet or new_sheet()
-    context = {"sheet": sheet, "checklist": checklist or {}}
+    context = {"sheet": sheet}
 
     input_msgs = [
-        {
-            "type": "message",
-            "role": "system",
-            "content": [{"type": "input_text", "text": AGENT_SYSTEM}],
-        },
-        {
-            "type": "message",
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}",
-            }],
-        },
+        {"role": "system", "content": AGENT_SYSTEM},
+        {"role": "user", "content": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}"},
     ]
 
-    tools = [{
-        "type": "function",
-        "name": "sepsis_command",
-        "description": "Single structured command: ask user, update sheet, or call API.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
-                "message": {"type": "string"},
-                "features": {
-                    "type": "object",
-                    "properties": {
-                        "clinical": {"type": "object", "additionalProperties": True},
-                        "labs": {"type": "object", "additionalProperties": True}
-                    }
-                },
-                "stage": {"type": "string", "enum": ["auto","S1","S2"]}
-            },
-            "required": ["action"],
-            "additionalProperties": False
-        }
-    }]
-
     resp = client.responses.create(
-        model=_get_llm_model(),
-        input=input_msgs,
-        tools=tools,
-        conversation=conv_id,   # may be None on first turn
+        model=os.getenv("LLM_MODEL_ID", "gpt-4o-mini"),
+        input=[{"type": "message", "role": m["role"], "content": [{"type": "text", "text": m["content"]}]} for m in input_msgs],
+        tools=[{
+            "type": "function",
+            "name": "sepsis_command",
+            "description": "Single structured command: ask user, update sheet, or call API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["ask","update_sheet","call_api"]},
+                    "message": {"type": "string"},
+                    "features": {
+                        "type": "object",
+                        "properties": {
+                            "clinical": {"type": "object", "additionalProperties": True},
+                            "labs": {"type": "object", "additionalProperties": True},
+                        },
+                    },
+                    "stage": {"type": "string", "enum": ["auto","S1","S2"]},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        }],
         temperature=0,
+        # `conversation` can be omitted; Responses will still work fine statelessly.
     )
 
-    # ---- Robustly get a conversation id (if any); otherwise keep what we had
-    new_conv_id = conv_id
-    try:
-        conv = getattr(resp, "conversation", None)
-        if conv:
-            # SDK can return a dict-like or typed object
-            if isinstance(conv, dict):
-                new_conv_id = conv.get("id") or new_conv_id
-            else:
-                new_conv_id = getattr(conv, "id", None) or new_conv_id
-    except Exception:
-        pass
+    say, cmd = "", None
 
-    # ---- Safely turn the response into a plain dict, then parse output items
-    try:
-        resp_dict = resp.model_dump()  # pydantic-ish
-    except Exception:
-        try:
-            resp_dict = json.loads(resp.model_dump_json())
-        except Exception:
-            # last resort
-            resp_dict = json.loads(str(resp))
+    # Text outputs (if the model chooses to talk)
+    for item in (resp.output or []):
+        if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
+            for c in (getattr(item, "content", []) or []):
+                if getattr(c, "type", "") in ("output_text", "input_text", "text"):
+                    say += (getattr(c, "text", "") or "")
 
-    say = ""
-    cmd = None
-    for item in (resp_dict.get("output") or []):
-        itype = item.get("type", "")
-        # assistant text
-        if itype == "message" and item.get("role") == "assistant":
-            for c in (item.get("content") or []):
-                if c.get("type") == "output_text":
-                    say += c.get("text", "")
-
-        # function/tool call (Responses uses 'function_call')
-        if itype in ("function_call", "tool_call"):
-            name = item.get("name")
-            if name == "sepsis_command":
-                args = item.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        cmd = json.loads(args)
-                    except Exception:
-                        cmd = None
-                elif isinstance(args, dict):
-                    cmd = args
+        # Tool call
+        if getattr(item, "type", "") in ("function_call", "tool_call") and getattr(item, "name", "") == "sepsis_command":
+            try:
+                cmd = json.loads(getattr(item, "arguments", "") or "{}")
+            except Exception:
+                cmd = None
 
     if DEBUG_AGENT:
         try:
             log.info("[RESPONSES RAW]\n%s", resp.model_dump_json(indent=2))
         except Exception:
             log.info("[RESPONSES RAW] %s", resp)
-        log.info("[RESPONSES SAY] %s", (say or "").strip())
+        log.info("[RESPONSES SAY] %s", say.strip())
         log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
-        log.info("[SHEET] %s", json.dumps(state["sheet"], indent=2))
+        log.info("[SHEET] %s", json.dumps(sheet, indent=2))  # ✅ use local `sheet`
 
-
-    return (say.strip() or None), cmd, new_conv_id
+    return (say.strip() or None), cmd, None  # we’re not using conversation IDs here
 
 
 # --------------------------------
@@ -355,103 +311,67 @@ def merge_features(sheet, feats):
 
 
 def run_pipeline(state, user_text, stage="auto", use_llm=True):
-    # --- init state ---
     state.setdefault("sheet", None)
     state.setdefault("conv_id", None)
 
-    # utility: next question for a missing field
-    qmap = {
-        "age.months": "How old is the child (in months)?",
-        "sex": "What is the child's sex? (male=0, female=1)",
-        "hr.all": "What is the heart rate (beats per minute)?",
-        "rr.all": "What is the respiratory rate (breaths per minute)?",
-        "oxy.ra": "What is the oxygen saturation on room air (SpO₂ %)?",
-    }
+    if use_llm:
+        say, cmd, _ = agent_step(user_text, state["sheet"], state["conv_id"])
 
-    if not use_llm:
-        # toggle off → legacy regex path
-        return run_pipeline_legacy(state, user_text, stage)
+        # If the model just talks (no tool call), show its message
+        if not cmd:
+            return state, (say or "…")
 
-    # --- compute checklist for this turn and pass it to the model ---
-    sheet = state.get("sheet") or new_sheet()
-    missing_req, _warns = validate_complete(sheet["features"]["clinical"])
-    labs_present = [k for k in LAB_KEYS if k in (sheet["features"]["labs"] or {})]
-    next_required = missing_req[0] if missing_req else None
-    state["sheet"] = sheet
-
-    say, cmd, conv_id = agent_step(
-        user_text=user_text,
-        sheet=state["sheet"],
-        conv_id=state["conv_id"],
-        checklist={"missing_required": missing_req,
-                   "labs_present": labs_present,
-                   "next_required": next_required}
-    )
-    state["conv_id"] = conv_id
-
-    # If the model just talks (no tool call), show its message
-    if not cmd:
-        return state, (say or "…")
-
-    action = cmd.get("action")
-
-    # --- UPDATE SHEET ---
-    if action == "update_sheet":
+        action = cmd.get("action")
         feats = cmd.get("features") or {}
         if not isinstance(feats, dict):
             feats = {}
 
-        state["sheet"] = merge_features(state.get("sheet") or new_sheet(), feats)
+        if action == "update_sheet":
+            state["sheet"] = merge_sheet(
+                state.get("sheet") or new_sheet(),
+                feats.get("clinical", {}) or {},
+                feats.get("labs", {}) or {},
+            )
+            return state, (cmd.get("message") or say or "")
 
-        # After updating, compute what's still missing and auto-ask next if the model didn't.
-        missing_after, _ = validate_complete(state["sheet"]["features"]["clinical"])
-        follow = (cmd.get("message") or say or "").strip()
-        if missing_after:
-            nxt = missing_after[0]
-            if "?" not in follow:  # model didn't include a next question
-                follow = (follow + ("\n\n" if follow else "")) + qmap.get(nxt, "What’s the next missing field?")
-        return state, (follow or "OK")
+        if action == "ask":
+            return state, (cmd.get("message") or say or "")
 
-    # --- ASK ---
-    if action == "ask":
-        return state, (cmd.get("message") or say or "")
+        if action == "call_api":
+            # Merge any features the model included right before the call
+            sheet = merge_sheet(
+                state.get("sheet") or new_sheet(),
+                feats.get("clinical", {}) or {},
+                feats.get("labs", {}) or {},
+            )
 
-    # --- CALL API ---
-    if action == "call_api":
-        fs = cmd.get("features") or {}
-        # Merge any last-second features the model provided
-        working_sheet = merge_features(state.get("sheet") or new_sheet(), fs)
+            stage_req = (cmd.get("stage") or "auto")
+            if stage_req == "auto":
+                stage_req = "S2" if sheet["features"]["labs"] else "S1"
 
-        # Decide stage from data (don’t rely on model)
-        have_labs = bool(working_sheet["features"]["labs"])
-        stage_req = "S2" if have_labs else "S1"
+            try:
+                if stage_req == "S1":
+                    missing, _ = validate_complete(sheet["features"]["clinical"])
+                    if missing:
+                        return state, "Missing required fields for S1: " + ", ".join(missing) + "."
+                    s1 = call_s1(sheet["features"]["clinical"])
+                    sheet["s1"] = s1
+                    state["sheet"] = sheet
+                    return state, f"{cmd.get('message') or say or ''}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+                else:
+                    features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
+                    s2 = call_s2(features)
+                    sheet["s2"] = s2
+                    state["sheet"] = sheet
+                    return state, f"{cmd.get('message') or say or ''}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(sheet, indent=2)}\n```"
+            except Exception as e:
+                return state, f"{cmd.get('message') or say or ''}\n\nError calling API: {e}"
 
-        # Validate S1 minimums before calling
-        missing_now, _ = validate_complete(working_sheet["features"]["clinical"])
-        if stage_req == "S1" and missing_now:
-            ask = qmap.get(missing_now[0], "I need one more value.")
-            return state, f"I still need: {', '.join(missing_now)}.\n\n{ask}"
+        # Unknown action → just show the assistant text
+        return state, (say or "")
 
-        try:
-            if stage_req == "S1":
-                s1 = call_s1(working_sheet["features"]["clinical"])
-                working_sheet["s1"] = s1
-                state["sheet"] = working_sheet
-                prefix = (cmd.get("message") or say or "Running S1…").strip()
-                return state, f"{prefix}\n\n**S1 decision:** {s1.get('s1_decision')}\n\n```json\n{json.dumps(working_sheet, indent=2)}\n```"
-            else:
-                features = {**working_sheet["features"]["clinical"], **working_sheet["features"]["labs"]}
-                s2 = call_s2(features)
-                working_sheet["s2"] = s2
-                state["sheet"] = working_sheet
-                prefix = (cmd.get("message") or say or "Running S2…").strip()
-                return state, f"{prefix}\n\n**S2 decision:** {s2.get('s2_decision')}\n\n```json\n{json.dumps(working_sheet, indent=2)}\n```"
-        except Exception as e:
-            prefix = (cmd.get("message") or say or "").strip()
-            return state, f"{prefix}\n\nError calling API: {e}"
-
-    # Unknown action → just show the assistant text
-    return state, (say or "")
+    # toggle off → legacy regex path
+    return run_pipeline_legacy(state, user_text, stage)
 
 # --------------------------------
 # In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
