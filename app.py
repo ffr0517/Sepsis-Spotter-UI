@@ -154,9 +154,7 @@ def call_s2(features):
 # Agent helpers (LLM orchestrator)
 # --------------------------------
 def _get_llm_model():
-    # Prefer env; fall back to a good default
     m = os.getenv("LLM_MODEL_ID", "").strip()
-    # If someone mistakenly sets a HF model name (has a slash), force our default
     if not m or "/" in m:
         return "gpt-4o-mini"
     return m
@@ -169,35 +167,67 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     sheet = sheet or new_sheet()
     context = {"sheet": sheet}
 
-    # ✅ Responses API expects messages (role + content), not "input_text" parts
+    # Responses API expects items, not chat-style role/content pairs; use a system message + a user message.
     input_msgs = [
-        {"role": "system", "content": AGENT_SYSTEM},
         {
+            "type": "message",
+            "role": "system",
+            "content": [{"type": "input_text", "text": AGENT_SYSTEM}],
+        },
+        {
+            "type": "message",
             "role": "user",
-            "content": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}"
+            "content": [{
+                "type": "input_text",
+                "text": f"CONTEXT:\n{json.dumps(context, indent=2)}\n\nUSER:\n{(user_text or '').strip()}",
+            }],
         },
     ]
 
+    # Tools schema for Responses API (function tool)
+    tools = [
+        {
+            "type": "function",
+            "name": "sepsis_command",
+            "description": "Single structured command: ask user, update sheet, or call API.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
+                    "message": {"type": "string", "description": "Short user-visible text/question."},
+                    "features": {
+                        "type": "object",
+                        "properties": {
+                            "clinical": {"type": "object", "additionalProperties": True},
+                            "labs": {"type": "object", "additionalProperties": True},
+                        },
+                    },
+                    "stage": {"type": "string", "enum": ["auto", "S1", "S2"]},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        }
+    ]
+
     resp = client.responses.create(
-    model=_get_llm_model(),
-    input=input_items,
-    tools=TOOL_SPEC,
-    conversation=conv_id,
-    temperature=0
-)
+        model=_get_llm_model(),
+        input=input_msgs,           # <-- use input_msgs here
+        tools=tools,
+        conversation=conv_id,       # None on first turn; OpenAI creates one
+        temperature=0,
+    )
 
     say = ""
     cmd = None
-    # conversation is an object; keep id for next turn
     new_conv_id = getattr(resp, "conversation", {}).get("id", None)
 
-    # Parse outputs: messages + tool calls
     for item in (resp.output or []):
         if item.get("type") == "message" and item.get("role") == "assistant":
-            # item["content"] is a list of parts; pick text parts
-            for c in (item.get("content") or []):
+            for c in item.get("content", []):
                 if c.get("type") == "output_text":
                     say += c.get("text", "")
+
         if item.get("type") == "tool_call" and item.get("name") == "sepsis_command":
             try:
                 cmd = json.loads(item.get("arguments") or "{}")
@@ -206,17 +236,13 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
 
     if DEBUG_AGENT:
         try:
-            # New SDK: model_dump_json may not exist on all objects; be defensive
-            log.info("[RESPONSES RAW] %s", getattr(resp, "model_dump_json", lambda **_: str(resp))())
+            log.info("[RESPONSES RAW]\n%s", resp.model_dump_json(indent=2))
         except Exception:
-            log.info("[RESPONSES RAW] %s", str(resp))
+            log.info("[RESPONSES RAW] %s", resp)
         log.info("[RESPONSES SAY] %s", (say or "").strip())
         log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
 
     return (say.strip() or None), cmd, (new_conv_id or conv_id)
-
-
-
 
 # --------------------------------
 # Orchestration (Agent-first when toggle ON)
