@@ -28,26 +28,24 @@ You are SepsisAgent (research preview; not medical advice).
 
 TOOL_SPEC = [{
     "type": "function",
-    "function": {
-        "name": "sepsis_command",
-        "description": "Single structured command: ask user, update sheet, or call API.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
-                "message": {"type": "string", "description": "Short user-visible text/question."},
-                "features": {
-                    "type": "object",
-                    "properties": {
-                       "clinical": {"type": "object", "additionalProperties": {}},
-                       "labs": {"type": "object", "additionalProperties": {}}
-                    }
-                },
-                "stage": {"type": "string", "enum": ["auto","S1","S2"]}
+    "name": "sepsis_command",                     # <- top-level name (required)
+    "description": "Single structured command: ask user, update sheet, or call API.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
+            "message": {"type": "string", "description": "Short user-visible text/question."},
+            "features": {
+                "type": "object",
+                "properties": {
+                    "clinical": {"type": "object", "additionalProperties": {"type": ["number","integer","string","boolean"]}},
+                    "labs": {"type": "object", "additionalProperties": {"type": ["number","integer","string","boolean"]}}
+                }
             },
-            "required": ["action"],
-            "additionalProperties": False
-        }
+            "stage": {"type": "string", "enum": ["auto","S1","S2"]}
+        },
+        "required": ["action"],
+        "additionalProperties": False
     }
 }]
 
