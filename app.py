@@ -735,6 +735,31 @@ textarea::placeholder, input::placeholder { color: #00cc00 !important; }
   box-shadow: inset 0 0 0 9999px rgba(0,255,0,0.02);
 }
 
+/* --- Force user bubble to black --- */
+.gr-chatbot .message.user,
+.gr-chatbot .message.user *,
+.gr-chatbot [data-testid="user"],
+.gr-chatbot [data-testid="user"] *,
+.gradio-container .chatbot .bubble.user,
+.gradio-container .chatbot .bubble.user * {
+  background: #000 !important;
+  color: #00ff00 !important;
+  border: 1px solid #00ff00 !important;
+  background-image: none !important;
+  box-shadow: 0 0 10px rgba(0,255,0,0.25);
+}
+
+/* --- Assistant bubble stays black + green border too --- */
+.gr-chatbot .message.bot,
+.gr-chatbot .message.bot *,
+.gr-chatbot [data-testid="bot"],
+.gr-chatbot [data-testid="bot"] * {
+  background: #000 !important;
+  color: #00ff00 !important;
+  border: 1px solid #00ff00 !important;
+  background-image: none !important;
+}
+
 /* Labels/markdown/links */
 label, .gr-form label, .prose, .prose * { color: #00ff00 !important; }
 a { color: #00ff00 !important; text-decoration-color: #00cc00 !important; }
@@ -814,29 +839,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: #00ff00; }
 .gradio-container [style*="background-color"] {
   background-color: #000 !important;
 }
-/* --- Force user bubble to black --- */
-.gr-chatbot .message.user,
-.gr-chatbot .message.user * {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-}
-
-/* --- Assistant bubble stays black + green border too --- */
-.gr-chatbot .message.bot,
-.gr-chatbot .message.bot * {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-}
-
-/* --- Catch any generic bubble wrappers Gradio uses --- */
-.gradio-container .chatbot .bubble,
-.gradio-container .chatbot .bubble * {
-  background: #000 !important;
-  color: #00ff00 !important;
-}
 """
+
 
 # --- UI ---------------------------------------------------------------
 with gr.Blocks(theme=theme, css=matrix_css, fill_height=True) as ui:
