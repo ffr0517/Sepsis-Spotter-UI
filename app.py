@@ -669,70 +669,21 @@ def check_login(u, p):
         ("" if ok else "Invalid username or password.")
     )
 
-with gr.Blocks(
-    fill_height=True,
-    css="""
-    :root {
-      --matrix-green: #00ff00;
-      --matrix-green-dim: #00cc00;
-      --matrix-green-ghost: rgba(0,255,0,0.15);
-      --bg: #000000;
-      --fg: var(--matrix-green);
-      --border: var(--matrix-green);
-    }
+theme = gr.themes.Base().set(
+    body_background_fill="#000000",
+    background_fill_primary="#000000",
+    background_fill_secondary="#000000",
+    block_background_fill="#000000",
+    panel_background_fill="#000000",
+    body_text_color="#00ff00",
+    input_background_fill="#000000",
+    input_text_color="#00ff00",
+    button_primary_background_fill="#000000",
+    button_primary_text_color="#00ff00",
+    button_primary_border_color="#00ff00"
+)
 
-    body, .gradio-container { background: var(--bg) !important; color: var(--fg) !important; }
-    .prose, .prose * { color: var(--fg) !important; }
-
-    .gr-block, .gr-group, .gr-column, .gr-row, .gr-panel { background: transparent !important; }
-
-    textarea, input[type="text"], input[type="password"] {
-      background: #000 !important;
-      color: var(--fg) !important;
-      border: 1px solid var(--border) !important;
-      box-shadow: none !important;
-    }
-    textarea::placeholder, input::placeholder { color: var(--matrix-green-dim) !important; }
-
-    .gr-button, button {
-      background: #000 !important;
-      color: var(--fg) !important;
-      border: 1px solid var(--border) !important;
-      border-radius: 10px !important;
-      transition: transform .06s ease, border-color .15s ease;
-    }
-    .gr-button:hover, button:hover {
-      border-color: var(--matrix-green-dim) !important;
-      transform: translateY(-1px);
-    }
-    .gr-button:active, button:active { transform: translateY(0); }
-
-    .gr-chatbot, .gr-chatbot * { background: transparent !important; color: var(--fg) !important; }
-    .gr-chatbot .message {
-      background: #000 !important;
-      border: 1px solid var(--border) !important;
-      box-shadow: inset 0 0 0 9999px rgba(0,255,0,0.02);
-    }
-    .gr-chatbot .message.user  { border-color: var(--matrix-green-dim) !important; }
-    .gr-chatbot .message.bot   { border-color: var(--matrix-green) !important; }
-
-    label, .gr-form label { color: var(--fg) !important; }
-    a { color: var(--fg) !important; text-decoration-color: var(--matrix-green-dim) !important; }
-
-    textarea[aria-label="Current Info Sheet (JSON)"] {
-      background: #000 !important;
-      border: 1px solid var(--border) !important;
-      color: var(--fg) !important;
-    }
-
-    .gr-group:has(> [aria-label="Username"]) {
-      border: 1px solid var(--border) !important;
-      padding: 16px !important;
-      border-radius: 12px !important;
-      background: rgba(0,255,0,0.02) !important;
-    }
-    """
-) as ui:
+with gr.Blocks(theme=theme, fill_height=True) as ui:
     # ---- Login view (create these FIRST) ----
     with gr.Group(visible=True) as login_view:
         gr.Markdown("#### 🔒 Sign in")
