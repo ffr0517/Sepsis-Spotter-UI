@@ -301,8 +301,8 @@ def extract_features(text: str):
     if m: clinical["age.months"] = float(m.group(1))
 
     # sex
-    if re.search(r"\bmale\b|\bboy\b", text, re.I): clinical["sex"] = 0
-    if re.search(r"\bfemale\b|\bgirl\b", text, re.I): clinical["sex"] = 1
+    if re.search(r"\bmale\b|\bboy\b", text, re.I): clinical["sex"] = 1
+    if re.search(r"\bfemale\b|\bgirl\b", text, re.I): clinical["sex"] = 0
 
     # vitals
     m = re.search(r"\bHR[:\s]*([0-9]{2,3})\b", text, re.I)
@@ -701,14 +701,77 @@ def check_login(u, p):
         ("" if ok else "Invalid username or password.")
     )
 
-with gr.Blocks(fill_height=True) as ui:
-    # ---- Login view ----
-    with gr.Group(visible=True) as login_view:
-        gr.Markdown("#### 🔒 Sign in")
-        u = gr.Textbox(label="Username", autofocus=True)
-        p = gr.Textbox(label="Password", type="password")
-        login_btn = gr.Button("Enter")
-        login_msg = gr.Markdown("")
+with gr.Blocks(
+    fill_height=True,
+    css="""
+    :root {
+      --matrix-green: #00ff00;
+      --matrix-green-dim: #00cc00;
+      --matrix-green-ghost: rgba(0,255,0,0.15);
+      --bg: #000000;
+      --fg: var(--matrix-green);
+      --border: var(--matrix-green);
+    }
+
+    body, .gradio-container { background: var(--bg) !important; color: var(--fg) !important; }
+    .prose, .prose * { color: var(--fg) !important; }
+
+    /* Panels / groups / columns */
+    .gr-block, .gr-group, .gr-column, .gr-row, .gr-panel { background: transparent !important; }
+
+    /* Textboxes / textareas */
+    textarea, input[type="text"], input[type="password"] {
+      background: #000 !important;
+      color: var(--fg) !important;
+      border: 1px solid var(--border) !important;
+      box-shadow: none !important;
+    }
+    textarea::placeholder, input::placeholder { color: var(--matrix-green-dim) !important; }
+
+    /* Buttons */
+    .gr-button, button {
+      background: #000 !important;
+      color: var(--fg) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: 10px !important;
+      transition: transform .06s ease, border-color .15s ease;
+    }
+    .gr-button:hover, button:hover {
+      border-color: var(--matrix-green-dim) !important;
+      transform: translateY(-1px);
+    }
+    .gr-button:active, button:active { transform: translateY(0); }
+
+    /* Chatbot */
+    .gr-chatbot, .gr-chatbot * { background: transparent !important; color: var(--fg) !important; }
+    .gr-chatbot .message {
+      background: #000 !important;
+      border: 1px solid var(--border) !important;
+      box-shadow: inset 0 0 0 9999px rgba(0,255,0,0.02);
+    }
+    .gr-chatbot .message.user  { border-color: var(--matrix-green-dim) !important; }
+    .gr-chatbot .message.bot   { border-color: var(--matrix-green) !important; }
+
+    /* Textbox labels, markdown links */
+    label, .gr-form label { color: var(--fg) !important; }
+    a { color: var(--fg) !important; text-decoration-color: var(--matrix-green-dim) !important; }
+
+    /* Info JSON box */
+    textarea[aria-label="Current Info Sheet (JSON)"] {
+      background: #000 !important;
+      border: 1px solid var(--border) !important;
+      color: var(--fg) !important;
+    }
+
+    /* Login card */
+    .gr-group:has(> [aria-label="Username"]) {
+      border: 1px solid var(--border) !important;
+      padding: 16px !important;
+      border-radius: 12px !important;
+      background: rgba(0,255,0,0.02) !important;
+    }
+    """
+) as ui:
 
     # ---- App view (hidden until login succeeds) ----
     with gr.Group(visible=False) as app_view:
@@ -726,9 +789,7 @@ with gr.Blocks(fill_height=True) as ui:
                     label="Use OpenAI LLM (agent mode)"
                 )
                 with gr.Row():
-                    btn_s1 = gr.Button("Run S1")
-                    btn_s2 = gr.Button("Run S2 (with labs)")
-                    btn_auto = gr.Button("Auto")
+                    btn_run = gr.Button("Run")
             with gr.Column(scale=2):
                 info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
@@ -766,15 +827,9 @@ with gr.Blocks(fill_height=True) as ui:
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
         )
-        btn_s1.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("S1"), use_llm_chk], [chat, state, info, msg]
-        )
-        btn_s2.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("S2"), use_llm_chk], [chat, state, info, msg]
-        )
-        btn_auto.click(on_user_send, [chat, msg], [chat, msg]).then(
+        btn_run.click(on_user_send, [chat, msg], [chat, msg]).then(
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
-        )
+            )
         merge_btn.click(on_merge, [state, paste], [state, tips, info])
 
     # Wire the login button
