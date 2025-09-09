@@ -724,6 +724,75 @@ a { color: #00ff00 !important; text-decoration-color: #00cc00 !important; }
 .gr-block, .gr-group, .gr-panel, .tabs, .tabitem {
   background: #000 !important;
 }
+
+/* Drive all theme layers to black */
+:root {
+  --background-fill-primary: #000 !important;
+  --background-fill-secondary: #000 !important;
+  --block-background-fill: #000 !important;
+  --panel-background-fill: #000 !important;
+  --body-background-fill: #000 !important;
+
+  /* border tokens */
+  --block-border-color: #00ff00 !important;
+  --border-color-accent: #00ff00 !important;
+  --color-accent: #00ff00 !important;
+}
+
+/* Any generic “light panel” utility classes Gradio/Tailwind uses */
+.gradio-container .bg-white,
+.gradio-container .bg-gray-50,
+.gradio-container .bg-gray-100,
+.gradio-container .bg-neutral-50,
+.gradio-container .bg-neutral-100,
+.gradio-container .bg-slate-50,
+.gradio-container .bg-slate-100 {
+  background-color: #000 !important;
+}
+
+/* Vertical & horizontal dividers between columns/rows */
+.gradio-container .gr-row > :not([hidden]) ~ :not([hidden]) {
+  border-left: 1px solid #00ff00 !important;
+}
+.gradio-container .divide-y > * {
+  border-top: 1px solid #00ff00 !important;
+}
+hr { border-color: #00ff00 !important; }
+
+/* Block/box borders (e.g., right panel frame, section frames) */
+.gradio-container .gr-box,
+.gradio-container .gr-block,
+.gradio-container .gr-group,
+.gradio-container .gr-panel {
+  background: #000 !important;
+  border-color: #00ff00 !important;
+}
+
+/* Field labels + section headers */
+.gradio-container label,
+.gradio-container .label,
+.gradio-container .prose h1, 
+.gradio-container .prose h2, 
+.gradio-container .prose h3 {
+  color: #00ff00 !important;
+  background: #000 !important;
+}
+
+/* Checkbox / radio accent color */
+input[type="checkbox"], input[type="radio"] { accent-color: #00ff00; }
+
+/* Footer / stray wrappers */
+.gradio-container footer,
+.gradio-container [class*="footer"],
+.gradio-container [style*="background-color: rgb(248, 250, 252)"],
+.gradio-container [style*="background-color: rgb(241, 245, 249)"] {
+  background: #000 !important;
+}
+
+/* Last resort: any element with explicit background styles */
+.gradio-container [style*="background-color"] {
+  background-color: #000 !important;
+}
 """
 
 # --- UI ---------------------------------------------------------------
