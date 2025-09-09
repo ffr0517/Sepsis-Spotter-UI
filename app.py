@@ -197,8 +197,15 @@ def _get_llm_model():
 # --------------------------------
 DEBUG_AGENT = bool(int(os.getenv("DEBUG_AGENT", "0")))
 
-def run_pipeline_legacy(state, user_text, stage="auto"):
+def run_pipeline(state, user_text, stage="auto", use_llm=True):
+    state = state or {"sheet": None, "conv_id": None}
+    sheet = state.get("sheet") or new_sheet()
+
+    # ✅ opportunistic merge on every turn
     clin_new, labs_new, _ = extract_features(user_text or "")
+    if clin_new or labs_new:
+        sheet = merge_sheet(sheet, clin_new, labs_new)
+        state["sheet"] = sheet
 
     sheet = state.get("sheet") or new_sheet()
     sheet = merge_sheet(sheet, clin_new, labs_new)
@@ -316,29 +323,32 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
     Returns (state, reply_text)
     """
     state = state or {"sheet": None, "conv_id": None}
+    sheet = state.get("sheet") or new_sheet()
+
+    # ✅ Always parse/merge from user text first (belt-and-braces even if the agent only 'asks')
+    clin_new, labs_new, _ = extract_features(user_text or "")
+    if clin_new or labs_new:
+        sheet = merge_sheet(sheet, clin_new, labs_new)
+        state["sheet"] = sheet
 
     if not use_llm:
         # Legacy path (regex extraction + direct call)
         return run_pipeline_legacy(state, user_text, stage=stage)
 
-    # Agent path
-    say, cmd, new_conv = agent_step(user_text, state.get("sheet"), state.get("conv_id"))
+    say, cmds, new_conv = agent_step(user_text, sheet, state.get("conv_id"))
     if new_conv:
         state["conv_id"] = new_conv
 
-    # If the model spoke and did NOT issue a tool call, just echo its text
-    if cmd is None:
-        reply = say or "Ok."
-        # opportunistically extract from free text to keep the sheet fresh
-        clin_new, labs_new, _ = extract_features(user_text or "")
-        if clin_new or labs_new:
-            state["sheet"] = merge_sheet(state.get("sheet") or new_sheet(), clin_new, labs_new)
-        return state, reply
+    reply = say or ""
 
-    # If we got a tool call, apply it
-    state, reply = handle_tool_cmd(state, cmd, user_text, stage_hint=stage)
+    if cmds:
+        # ✅ Apply every tool call in the order provided
+        for cmd in cmds:
+            state, reply = handle_tool_cmd(state, cmd, user_text, stage_hint=stage)
+    elif not reply:
+        reply = "Ok."
 
-    # Keep the sheet visible and helpful: append a compact JSON view
+    # Keep the sheet visible and helpful
     try:
         info_json = json.dumps(state.get("sheet") or {}, indent=2)
         reply = f"{reply}\n\n**Current Info Sheet:**\n```json\n{info_json}\n```"
@@ -346,6 +356,7 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
         pass
 
     return state, reply
+
 
 def plausible_from_text(text, k, v):
     # very light check: does a number appear that matches v?
@@ -365,8 +376,8 @@ def merge_features(sheet, feats):
 
 def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     """
-    Ask the model to chat naturally AND optionally emit a structured tool call.
-    Returns: (say_text, cmd_dict_or_None, new_conv_id)  # we don't use conv_id here
+    Ask the model to chat naturally AND optionally emit one or more structured tool calls.
+    Returns: (say_text, cmds_list_in_order, new_conv_id_or_original)
     """
     sheet = sheet or new_sheet()
     context = {"sheet": sheet}
@@ -389,7 +400,7 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
     ]
 
     resp = client.responses.create(
-        model=_get_llm_model(), 
+        model=_get_llm_model(),
         input=input_items,
         tools=[{
             "type": "function",
@@ -417,22 +428,24 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         # conversation=conv_id,  # optional; omit unless you really want server-side memory
     )
 
-    say, cmd = "", None
+    say = ""
+    cmds = []
     new_conv_id = getattr(resp, "conversation", None).id if getattr(resp, "conversation", None) else None
 
     for item in (resp.output or []):
-        # Assistant talkback comes as "message" with "output_text"
+        # Assistant text (if any)
         if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
             for c in (getattr(item, "content", []) or []):
                 if getattr(c, "type", "") == "output_text":
                     say += (getattr(c, "text", "") or "")
 
-        # Tool call (function call)
+        # Tool calls (may be multiple)
         if getattr(item, "type", "") in ("function_call", "tool_call") and getattr(item, "name", "") == "sepsis_command":
             try:
-                cmd = json.loads(getattr(item, "arguments", "") or "{}")
+                cmds.append(json.loads(getattr(item, "arguments", "") or "{}"))
             except Exception:
-                cmd = None
+                if DEBUG_AGENT:
+                    log.info("[RESPONSES TOOL ARGS PARSE ERROR] %s", getattr(item, "arguments", ""))
 
     if DEBUG_AGENT:
         try:
@@ -440,10 +453,10 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         except Exception:
             log.info("[RESPONSES RAW] %s", resp)
         log.info("[RESPONSES SAY] %s", say.strip())
-        log.info("[RESPONSES CMD] %s", json.dumps(cmd, indent=2) if cmd else "(none)")
+        log.info("[RESPONSES CMDS] %s", json.dumps(cmds, indent=2))
         log.info("[SHEET] %s", json.dumps(sheet, indent=2))
 
-    return (say.strip() or None), cmd, (new_conv_id or conv_id)
+    return (say.strip() or None), cmds, (new_conv_id or conv_id)
 
 
 # --------------------------------
