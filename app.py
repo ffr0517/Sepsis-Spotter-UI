@@ -325,7 +325,7 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
     state = state or {"sheet": None, "conv_id": None}
     sheet = state.get("sheet") or new_sheet()
 
-    # ✅ Always parse/merge from user text first (belt-and-braces even if the agent only 'asks')
+    # Always parse/merge from user text first
     clin_new, labs_new, _ = extract_features(user_text or "")
     if clin_new or labs_new:
         sheet = merge_sheet(sheet, clin_new, labs_new)
@@ -340,22 +340,51 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
         state["conv_id"] = new_conv
 
     reply = say or ""
-
     if cmds:
-        # ✅ Apply every tool call in the order provided
+        # Apply every tool call in order
         for cmd in cmds:
             state, reply = handle_tool_cmd(state, cmd, user_text, stage_hint=stage)
     elif not reply:
         reply = "Ok."
 
-    # Keep the sheet visible and helpful
-    try:
-        info_json = json.dumps(state.get("sheet") or {}, indent=2)
-        reply = f"{reply}\n\n**Current Info Sheet:**\n```json\n{info_json}\n```"
-    except Exception:
-        pass
-
     return state, reply
+
+def run_pipeline_legacy(state, user_text, stage="auto"):
+    clin_new, labs_new, _ = extract_features(user_text or "")
+
+    sheet = state.get("sheet") or new_sheet()
+    sheet = merge_sheet(sheet, clin_new, labs_new)
+
+    if stage == "auto":
+        stage = "S2" if sheet["features"]["labs"] else "S1"
+
+    missing, _ = validate_complete(sheet["features"]["clinical"])
+    if stage == "S1" and missing:
+        msg = "Missing required fields for S1: " + ", ".join(missing) + ". Please provide them."
+        state["sheet"] = sheet
+        return state, msg
+
+    try:
+        if stage == "S1":
+            s1 = call_s1(sheet["features"]["clinical"])
+            sheet["s1"] = s1
+            state["sheet"] = sheet
+            # Chat reply: decision only (no JSON dump)
+            summary = f"**S1 decision:** {s1.get('s1_decision')}"
+            return state, summary
+        elif stage == "S2":
+            features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
+            s2 = call_s2(features)
+            sheet["s2"] = s2
+            state["sheet"] = sheet
+            summary = f"**S2 decision:** {s2.get('s2_decision')}"
+            return state, summary
+        else:
+            return state, "Unknown stage."
+    except Exception as e:
+        return state, f"Error calling API: {e}"
+
+
 
 
 def plausible_from_text(text, k, v):
