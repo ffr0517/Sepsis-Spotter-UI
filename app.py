@@ -814,26 +814,27 @@ input[type="checkbox"], input[type="radio"] { accent-color: #00ff00; }
 .gradio-container [style*="background-color"] {
   background-color: #000 !important;
 }
-/* User chat bubble -> black background + green border */
-.gr-chatbot .message.user {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-  box-shadow: 0 0 10px rgba(0,255,0,0.25);
-}
-
-/* Catch variations Gradio may use across versions */
-.gradio-container .chatbot .message.user,
-.gr-chatbot .user .message,
-.gr-chatbot .bubble-wrap .bubble,
+/* --- Force user bubble to black --- */
+.gr-chatbot .message.user,
 .gr-chatbot .message.user * {
   background: #000 !important;
   color: #00ff00 !important;
+  border: 1px solid #00ff00 !important;
 }
 
-/* Remove any residual gradient/fill on the user bubble */
-.gr-chatbot .message.user[data-testid="user"] {
+/* --- Assistant bubble stays black + green border too --- */
+.gr-chatbot .message.bot,
+.gr-chatbot .message.bot * {
   background: #000 !important;
+  color: #00ff00 !important;
+  border: 1px solid #00ff00 !important;
+}
+
+/* --- Catch any generic bubble wrappers Gradio uses --- */
+.gradio-container .chatbot .bubble,
+.gradio-container .chatbot .bubble * {
+  background: #000 !important;
+  color: #00ff00 !important;
 }
 """
 
