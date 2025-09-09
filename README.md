@@ -1,7 +1,7 @@
 ---
 title: Sepsis Spotter UI
 emoji: 🚑
-colorFrom: black
+colorFrom: green
 colorTo: green
 sdk: gradio
 app_file: app.py
