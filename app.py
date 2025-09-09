@@ -85,16 +85,16 @@ When emitting `{"action":"call_api","stage":"S1"}`, include `features.clinical` 
 - `parenteral_screen` → Parenteral treatment before enrolment → integer {0,1} → 0
 - `SIRS_num` → SIRS score (0–4) → integer 0–4 → 0
 
-## Output Formatting After API
-After receiving an API result, always present the prediction using this standard format:
+## Output Formatting for Proving Results to the User
+After receiving an API response with a result, always present the prediction using this standard format:
 
-- If **SEVERE**:  
+- If **Severe**:  
   “S1 prediction: SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a severe outcome within 48 hours. That is, death/receipt of organ support/discharged home to die within 48 hours.”
 
-- If **NOT SEVERE**:  
+- If **NOTSevere**:  
   “S1 prediction: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a non-severe disease. That is, no admittance to any health facility, and symptoms resolved within 28 days.”
 
-- If **OTHER**:  
+- If **Other**:  
   “S1 prediction: OTHER. According to historical data and model specifics, laboratory tests/biomarkers are required to make a more informed outcome prediction. Please note that the model incorporating laboratory results and biomarkers is NOT currently available.”
 
 Always follow with the disclaimer:
