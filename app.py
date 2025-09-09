@@ -76,6 +76,20 @@ envhtemp → Axillary temperature (°C) → number → 0.0
 crt.long → Capillary refill >2 s → integer {0,1} → 0
 parenteral_screen → Parenteral treatment before enrolment → integer {0,1} → 0
 SIRS_num → SIRS score (0–4) → integer 0–4 → 0
+fter receiving an API result, you must always present the model prediction using this standard format:
+
+- If the output is SEVERE: 
+  “S1 prediction: SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a severe outcome within 48 hours. That is, death/receipt of organ support/discharged home to die within 48 hours.”
+
+- If the output is NOT SEVERE:
+  “S1 prediction: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a non-severe disease. That is, no admittance to any health facility, and symptoms resolved within 28 days.”
+
+- If the output is OTHER:
+  “S1 prediction: OTHER. According to historical data and model specifics, laboratory tests/biomarkers are required to make a more informed outcome prediction. Please note that the model incorporating laboratory results and biomarkers is NOT currently available.”
+
+Always follow this with the disclaimer:
+“This is clinical decision support, not a diagnosis. You must use your own clinical judgment, training, and knowledge to make referral or treatment decisions. No liability is accepted.”
+
 Canonical S1 call_api Template
 {
   "action": "call_api",
