@@ -669,6 +669,7 @@ def check_login(u, p):
         ("" if ok else "Invalid username or password.")
     )
 
+# --- THEME + MATRIX CSS (error-safe) -----------------------------------
 theme = gr.themes.Base().set(
     body_background_fill="#000000",
     background_fill_primary="#000000",
@@ -676,14 +677,57 @@ theme = gr.themes.Base().set(
     block_background_fill="#000000",
     panel_background_fill="#000000",
     body_text_color="#00ff00",
-    input_background_fill="#000000",
-    input_text_color="#00ff00",
     button_primary_background_fill="#000000",
-    button_primary_text_color="#00ff00",
-    button_primary_border_color="#00ff00"
+    button_primary_text_color="#00ff00"
 )
 
-with gr.Blocks(theme=theme, fill_height=True) as ui:
+matrix_css = """
+/* Inputs: black bg, neon-green text + border */
+textarea, input[type="text"], input[type="password"] {
+  background: #000 !important;
+  color: #00ff00 !important;
+  border: 1px solid #00ff00 !important;
+  box-shadow: 0 0 6px rgba(0,255,0,0.35) inset;
+}
+textarea::placeholder, input::placeholder { color: #00cc00 !important; }
+
+/* Buttons: green border + glow, lift on hover */
+.gr-button, button {
+  background: #000 !important;
+  color: #00ff00 !important;
+  border: 1px solid #00ff00 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 0 10px rgba(0,255,0,0.25);
+  transition: transform .06s ease, box-shadow .15s ease, border-color .15s ease;
+}
+.gr-button:hover, button:hover {
+  border-color: #00cc00 !important;
+  box-shadow: 0 0 16px rgba(0,255,0,0.45);
+  transform: translateY(-1px);
+}
+
+/* Chatbot: transparent bubbles with green borders */
+.gr-chatbot, .gr-chatbot * { color: #00ff00 !important; }
+.gr-chatbot .message {
+  background: #000 !important;
+  border: 1px solid #00ff00 !important;
+  box-shadow: inset 0 0 0 9999px rgba(0,255,0,0.02);
+}
+
+/* Labels/markdown/links */
+label, .gr-form label, .prose, .prose * { color: #00ff00 !important; }
+a { color: #00ff00 !important; text-decoration-color: #00cc00 !important; }
+
+/* Kill any stray light backgrounds */
+.gradio-container,
+.gradio-container .container,
+.gr-block, .gr-group, .gr-panel, .tabs, .tabitem {
+  background: #000 !important;
+}
+"""
+
+# --- UI ---------------------------------------------------------------
+with gr.Blocks(theme=theme, css=matrix_css, fill_height=True) as ui:
     # ---- Login view (create these FIRST) ----
     with gr.Group(visible=True) as login_view:
         gr.Markdown("#### 🔒 Sign in")
