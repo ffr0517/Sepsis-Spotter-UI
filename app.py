@@ -395,46 +395,67 @@ def _get_llm_model():
 # --------------------------------
 DEBUG_AGENT = bool(int(os.getenv("DEBUG_AGENT", "0")))
 
+def llm_available() -> bool:
+    """Return True iff we have a plausible OpenAI API key in env."""
+    k = os.getenv("OPENAI_API_KEY", "").strip()
+    return len(k) >= 20  # cheap sanity check; avoids empty/placeholder keys
+
+
+def safe_agent_step(user_text: str, sheet: dict, conv_id: str | None):
+    """
+    Wrap agent_step in a try/except so we never break the UI.
+    Returns: (say, cmds, conv_id, error_text_or_None)
+    """
+    try:
+        say, cmds, new_conv = agent_step(user_text, sheet, conv_id)
+        return say, cmds, new_conv, None
+    except Exception as e:
+        log.exception("[AGENT] agent_step failed")
+        return None, [], conv_id, f"Agent mode error: {e}"
+
 def run_pipeline(state, user_text, stage="auto", use_llm=True):
+    """
+    Entry used by the Gradio callbacks.
+    Returns (state, reply_text)
+    """
     state = state or {"sheet": None, "conv_id": None}
     sheet = state.get("sheet") or new_sheet()
 
-    # ✅ opportunistic merge on every turn
+    # Always parse/merge from user text first
     clin_new, labs_new, _ = extract_features(user_text or "")
     if clin_new or labs_new:
         sheet = merge_sheet(sheet, clin_new, labs_new)
         state["sheet"] = sheet
 
-    sheet = state.get("sheet") or new_sheet()
-    sheet = merge_sheet(sheet, clin_new, labs_new)
-
-    if stage == "auto":
-        stage = "S2" if sheet["features"]["labs"] else "S1"
-
-    missing, _ = validate_complete(sheet["features"]["clinical"])
-    if stage == "S1" and missing:
-        msg = "Missing required fields for S1: " + ", ".join(missing) + ". Please provide them."
-        state["sheet"] = sheet
-        return state, msg
-
-    try:
-        if stage == "S1":
-            s1 = call_s1(sheet["features"]["clinical"])
-            sheet["s1"] = s1
-            state["sheet"] = sheet
-            summary = f"**S1 decision:** {s1.get('s1_decision')}\n\n**Current Info Sheet:**\n```json\n{json.dumps(sheet, indent=2)}\n```"
-            return state, summary
-        elif stage == "S2":
-            features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
-            s2 = call_s2(features)
-            sheet["s2"] = s2
-            state["sheet"] = sheet
-            summary = f"**S2 decision:** {s2.get('s2_decision')}\n\n**Current Info Sheet:**\n```json\n{json.dumps(sheet, indent=2)}\n```"
-            return state, summary
+    # If user disabled LLM or API key missing, go legacy immediately
+    if not use_llm or not llm_available():
+        if not use_llm:
+            log.info("[AGENT] Skipping LLM (checkbox off); using legacy pipeline.")
         else:
-            return state, "Unknown stage."
-    except Exception as e:
-        return state, f"Error calling API: {e}"
+            log.warning("[AGENT] OPENAI_API_KEY missing/invalid; using legacy pipeline.")
+        return run_pipeline_legacy(state, user_text, stage=stage)
+
+    # Try the agent (LLM) path, and cleanly fall back if anything goes wrong
+    say, cmds, new_conv, err = safe_agent_step(user_text, sheet, state.get("conv_id"))
+    if new_conv:
+        state["conv_id"] = new_conv
+
+    if err:
+        # Fall back to legacy, but tell the user what happened (briefly)
+        state, reply = run_pipeline_legacy(state, user_text, stage=stage)
+        reply = "Agent mode is temporarily unavailable — continuing in direct mode.\n\n" + reply
+        return state, reply
+
+    # If the agent returned tool calls, apply them in order
+    reply = say or ""
+    if cmds:
+        for cmd in cmds:
+            state, reply = handle_tool_cmd(state, cmd, user_text, stage_hint=stage)
+    elif not reply:
+        reply = "Ok."
+
+    return state, reply
+
 
 def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     """
@@ -823,6 +844,8 @@ with gr.Blocks(theme=theme, css=matrix_css, fill_height=True) as ui:
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
                 merge_btn = gr.Button("Merge")
                 tips = gr.Markdown("")
+            if not llm_available():
+                    tips.value = "⚠️ Agent mode disabled: missing OPENAI_API_KEY."
 
         state = gr.State({"sheet": None, "conv_id": None})
 
