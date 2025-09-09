@@ -515,38 +515,6 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     state["sheet"] = sheet
     return state, "I didn’t receive a valid action from the tool call."
 
-def run_pipeline(state, user_text, stage="auto", use_llm=True):
-    """
-    Entry used by the Gradio callbacks.
-    Returns (state, reply_text)
-    """
-    state = state or {"sheet": None, "conv_id": None}
-    sheet = state.get("sheet") or new_sheet()
-
-    # Always parse/merge from user text first
-    clin_new, labs_new, _ = extract_features(user_text or "")
-    if clin_new or labs_new:
-        sheet = merge_sheet(sheet, clin_new, labs_new)
-        state["sheet"] = sheet
-
-    if not use_llm:
-        # Legacy path (regex extraction + direct call)
-        return run_pipeline_legacy(state, user_text, stage=stage)
-
-    say, cmds, new_conv = agent_step(user_text, sheet, state.get("conv_id"))
-    if new_conv:
-        state["conv_id"] = new_conv
-
-    reply = say or ""
-    if cmds:
-        # Apply every tool call in order
-        for cmd in cmds:
-            state, reply = handle_tool_cmd(state, cmd, user_text, stage_hint=stage)
-    elif not reply:
-        reply = "Ok."
-
-    return state, reply
-
 def run_pipeline_legacy(state, user_text, stage="auto"):
     clin_new, labs_new, _ = extract_features(user_text or "")
 
@@ -716,10 +684,8 @@ with gr.Blocks(
     body, .gradio-container { background: var(--bg) !important; color: var(--fg) !important; }
     .prose, .prose * { color: var(--fg) !important; }
 
-    /* Panels / groups / columns */
     .gr-block, .gr-group, .gr-column, .gr-row, .gr-panel { background: transparent !important; }
 
-    /* Textboxes / textareas */
     textarea, input[type="text"], input[type="password"] {
       background: #000 !important;
       color: var(--fg) !important;
@@ -728,7 +694,6 @@ with gr.Blocks(
     }
     textarea::placeholder, input::placeholder { color: var(--matrix-green-dim) !important; }
 
-    /* Buttons */
     .gr-button, button {
       background: #000 !important;
       color: var(--fg) !important;
@@ -742,7 +707,6 @@ with gr.Blocks(
     }
     .gr-button:active, button:active { transform: translateY(0); }
 
-    /* Chatbot */
     .gr-chatbot, .gr-chatbot * { background: transparent !important; color: var(--fg) !important; }
     .gr-chatbot .message {
       background: #000 !important;
@@ -752,18 +716,15 @@ with gr.Blocks(
     .gr-chatbot .message.user  { border-color: var(--matrix-green-dim) !important; }
     .gr-chatbot .message.bot   { border-color: var(--matrix-green) !important; }
 
-    /* Textbox labels, markdown links */
     label, .gr-form label { color: var(--fg) !important; }
     a { color: var(--fg) !important; text-decoration-color: var(--matrix-green-dim) !important; }
 
-    /* Info JSON box */
     textarea[aria-label="Current Info Sheet (JSON)"] {
       background: #000 !important;
       border: 1px solid var(--border) !important;
       color: var(--fg) !important;
     }
 
-    /* Login card */
     .gr-group:has(> [aria-label="Username"]) {
       border: 1px solid var(--border) !important;
       padding: 16px !important;
@@ -772,6 +733,13 @@ with gr.Blocks(
     }
     """
 ) as ui:
+    # ---- Login view (create these FIRST) ----
+    with gr.Group(visible=True) as login_view:
+        gr.Markdown("#### 🔒 Sign in")
+        u = gr.Textbox(label="Username", autofocus=True)
+        p = gr.Textbox(label="Password", type="password")
+        login_btn = gr.Button("Enter")
+        login_msg = gr.Markdown("")
 
     # ---- App view (hidden until login succeeds) ----
     with gr.Group(visible=False) as app_view:
@@ -783,13 +751,9 @@ with gr.Blocks(
                     placeholder="Describe the case (e.g., '2-year-old, HR 154, RR 36, SpO₂ 95%')",
                     lines=3
                 )
-                # ✅ LLM orchestrator toggle
-                use_llm_chk = gr.Checkbox(
-                    value=USE_LLM_DEFAULT,
-                    label="Use OpenAI LLM (agent mode)"
-                )
+                use_llm_chk = gr.Checkbox(value=USE_LLM_DEFAULT, label="Use OpenAI LLM (agent mode)")
                 with gr.Row():
-                    btn_run = gr.Button("Run")
+                    btn_run = gr.Button("Run")  # single button, always 'auto'
             with gr.Column(scale=2):
                 info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
@@ -798,6 +762,7 @@ with gr.Blocks(
 
         state = gr.State({"sheet": None, "conv_id": None})
 
+        # --- callbacks ---
         def on_user_send(history, text):
             history = history + [{"role": "user", "content": text}]
             return history, ""
@@ -823,22 +788,20 @@ with gr.Blocks(
                 st["sheet"] = blob
             return st, "Merged.", json.dumps(st["sheet"], indent=2)
 
-        # Wire chat + buttons (pass checkbox through)
+        # --- wiring (after widgets exist) ---
+        login_btn.click(check_login, [u, p], [login_view, app_view, login_msg])
+
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
         )
         btn_run.click(on_user_send, [chat, msg], [chat, msg]).then(
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
-            )
+        )
         merge_btn.click(on_merge, [state, paste], [state, tips, info])
-
-    # Wire the login button
-    login_btn.click(check_login, [u, p], [login_view, app_view, login_msg])
 
 # ---- Launch settings: Spaces vs local ---------------------------------
 IS_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID") or os.getenv("SYSTEM") == "spaces")
 if IS_SPACES:
-    # On Spaces: let proxy choose host/port; disable SSR to avoid locale/i18n issues.
     ui.launch(ssr_mode=False)
 else:
     ui.launch(server_name="127.0.0.1", server_port=7860)
