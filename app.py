@@ -16,7 +16,7 @@ USE_LLM_DEFAULT = True  # default for the UI checkbox
 AGENT_SYSTEM = """
 You are Sepsis Spotter, a clinical intake and orchestration assistant (research preview; not a diagnosis).
 
-In your first message to the user, you MUST state which LLM model you are using, e.g., "I am using GPT-4o-mini."
+In your first message to the user, you MUST state which LLM model you are using, e.g., "I am using GPT-X."
 
 ## Mission & Style
 - Help front-line clinicians use the Spot Sepsis models safely and efficiently.
