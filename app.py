@@ -690,160 +690,10 @@ def check_login(u, p):
         ("" if ok else "Invalid username or password.")
     )
 
-# --- THEME + MATRIX CSS (error-safe) -----------------------------------
-theme = gr.themes.Base().set(
-    body_background_fill="#000000",
-    background_fill_primary="#000000",
-    background_fill_secondary="#000000",
-    block_background_fill="#000000",
-    panel_background_fill="#000000",
-    body_text_color="#00ff00",
-    button_primary_background_fill="#000000",
-    button_primary_text_color="#00ff00"
-)
-
-matrix_css = """
-/* Inputs: black bg, neon-green text + border */
-textarea, input[type="text"], input[type="password"] {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-  box-shadow: 0 0 6px rgba(0,255,0,0.35) inset;
-}
-textarea::placeholder, input::placeholder { color: #00cc00 !important; }
-
-/* Buttons: green border + glow, lift on hover */
-.gr-button, button {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-  border-radius: 12px !important;
-  box-shadow: 0 0 10px rgba(0,255,0,0.25);
-  transition: transform .06s ease, box-shadow .15s ease, border-color .15s ease;
-}
-.gr-button:hover, button:hover {
-  border-color: #00cc00 !important;
-  box-shadow: 0 0 16px rgba(0,255,0,0.45);
-  transform: translateY(-1px);
-}
-
-/* Chatbot: transparent bubbles with green borders */
-.gr-chatbot, .gr-chatbot * { color: #00ff00 !important; }
-.gr-chatbot .message {
-  background: #000 !important;
-  border: 1px solid #00ff00 !important;
-  box-shadow: inset 0 0 0 9999px rgba(0,255,0,0.02);
-}
-
-/* --- Force user bubble to black --- */
-.gr-chatbot .message.user,
-.gr-chatbot .message.user *,
-.gr-chatbot [data-testid="user"],
-.gr-chatbot [data-testid="user"] *,
-.gradio-container .chatbot .bubble.user,
-.gradio-container .chatbot .bubble.user * {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-  background-image: none !important;
-  box-shadow: 0 0 10px rgba(0,255,0,0.25);
-}
-
-/* --- Assistant bubble stays black + green border too --- */
-.gr-chatbot .message.bot,
-.gr-chatbot .message.bot *,
-.gr-chatbot [data-testid="bot"],
-.gr-chatbot [data-testid="bot"] * {
-  background: #000 !important;
-  color: #00ff00 !important;
-  border: 1px solid #00ff00 !important;
-  background-image: none !important;
-}
-
-/* Labels/markdown/links */
-label, .gr-form label, .prose, .prose * { color: #00ff00 !important; }
-a { color: #00ff00 !important; text-decoration-color: #00cc00 !important; }
-
-/* Kill any stray light backgrounds */
-.gradio-container,
-.gradio-container .container,
-.gr-block, .gr-group, .gr-panel, .tabs, .tabitem {
-  background: #000 !important;
-}
-
-/* Drive all theme layers to black */
-:root {
-  --background-fill-primary: #000 !important;
-  --background-fill-secondary: #000 !important;
-  --block-background-fill: #000 !important;
-  --panel-background-fill: #000 !important;
-  --body-background-fill: #000 !important;
-
-  /* border tokens */
-  --block-border-color: #00ff00 !important;
-  --border-color-accent: #00ff00 !important;
-  --color-accent: #00ff00 !important;
-}
-
-/* Any generic “light panel” utility classes Gradio/Tailwind uses */
-.gradio-container .bg-white,
-.gradio-container .bg-gray-50,
-.gradio-container .bg-gray-100,
-.gradio-container .bg-neutral-50,
-.gradio-container .bg-neutral-100,
-.gradio-container .bg-slate-50,
-.gradio-container .bg-slate-100 {
-  background-color: #000 !important;
-}
-
-/* Vertical & horizontal dividers between columns/rows */
-.gradio-container .gr-row > :not([hidden]) ~ :not([hidden]) {
-  border-left: 1px solid #00ff00 !important;
-}
-.gradio-container .divide-y > * {
-  border-top: 1px solid #00ff00 !important;
-}
-hr { border-color: #00ff00 !important; }
-
-/* Block/box borders (e.g., right panel frame, section frames) */
-.gradio-container .gr-box,
-.gradio-container .gr-block,
-.gradio-container .gr-group,
-.gradio-container .gr-panel {
-  background: #000 !important;
-  border-color: #00ff00 !important;
-}
-
-/* Field labels + section headers */
-.gradio-container label,
-.gradio-container .label,
-.gradio-container .prose h1, 
-.gradio-container .prose h2, 
-.gradio-container .prose h3 {
-  color: #00ff00 !important;
-  background: #000 !important;
-}
-
-/* Checkbox / radio accent color */
-input[type="checkbox"], input[type="radio"] { accent-color: #00ff00; }
-
-/* Footer / stray wrappers */
-.gradio-container footer,
-.gradio-container [class*="footer"],
-.gradio-container [style*="background-color: rgb(248, 250, 252)"],
-.gradio-container [style*="background-color: rgb(241, 245, 249)"] {
-  background: #000 !important;
-}
-
-/* Last resort: any element with explicit background styles */
-.gradio-container [style*="background-color"] {
-  background-color: #000 !important;
-}
-"""
 
 
-# --- UI ---------------------------------------------------------------
-with gr.Blocks(theme=theme, css=matrix_css, fill_height=True) as ui:
+# --- UI (defaults, no custom CSS/theme) -------------------------------
+with gr.Blocks(fill_height=True) as ui:
     # ---- Login view (create these FIRST) ----
     with gr.Group(visible=True) as login_view:
         gr.Markdown("#### 🔒 Sign in")
@@ -870,8 +720,6 @@ with gr.Blocks(theme=theme, css=matrix_css, fill_height=True) as ui:
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
                 merge_btn = gr.Button("Merge")
                 tips = gr.Markdown("")
-            if not llm_available():
-                    tips.value = "⚠️ Agent mode disabled: missing OPENAI_API_KEY."
 
         state = gr.State({"sheet": None, "conv_id": None})
 
