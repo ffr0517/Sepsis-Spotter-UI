@@ -651,7 +651,6 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
                 "additionalProperties": False,
             },
         }],
-        temperature=0,
         # conversation=conv_id,  # optional; omit unless you really want server-side memory
     )
 
