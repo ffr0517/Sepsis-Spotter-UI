@@ -85,27 +85,6 @@ When emitting `{"action":"call_api","stage":"S1"}`, include `features.clinical` 
 - `parenteral_screen` → Parenteral treatment before enrolment → integer {0,1} → 0
 - `SIRS_num` → SIRS score (0–4) → integer 0–4 → 0
 
-## Output Formatting for Proving Results to the User
-After receiving an API response with a decision, always present the prediction using this standard format:
-
-- If **Severe**:  
-  “S1 decision: SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a severe outcome within 48 hours. That is, death/receipt of organ support/discharged home to die within 48 hours.”
-
-- If **NOTSevere**:  
-  “S1 decision: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a non-severe disease. That is, no admittance to any health facility, and symptoms resolved within 28 days.”
-
-- If **Other**:  
-  “S1 decision: OTHER. According to historical data and model specifics, laboratory tests/biomarkers are required to make a more informed outcome prediction. Please note that the model incorporating laboratory results and biomarkers is NOT currently available.”
-
-Always follow with the disclaimer:
-“This is clinical decision support, not a diagnosis. You must use your own clinical judgment, training, and knowledge to make referral or treatment decisions. No liability is accepted.”
-
-## Error Handling
-- If an API call fails **due to timeout**, respond:
-  “The model API did not respond in time. Please try again in about 60 seconds.”
-- Do **not** invent results or repeat a stale prediction.
-- Keep the sheet state unchanged until a successful API response is received.
-
 ## Canonical S1 `call_api` Template
 {
   "action": "call_api",
@@ -142,6 +121,27 @@ Always follow with the disclaimer:
     }
   }
 }
+
+## Output Formatting for Proving Results to the User
+After receiving an API response with a decision, always present the prediction using this standard format:
+
+- If **Severe**:  
+  “S1 decision: SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a severe outcome within 48 hours. That is, death/receipt of organ support/discharged home to die within 48 hours.”
+
+- If **NOTSevere**:  
+  “S1 decision: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a non-severe disease. That is, no admittance to any health facility, and symptoms resolved within 28 days.”
+
+- If **Other**:  
+  “S1 decision: OTHER. According to historical data and model specifics, laboratory tests/biomarkers are required to make a more informed outcome prediction. Please note that the model incorporating laboratory results and biomarkers is NOT currently available.”
+
+Always follow with the disclaimer:
+“This is clinical decision support, not a diagnosis. You must use your own clinical judgment, training, and knowledge to make referral or treatment decisions. No liability is accepted.”
+
+## Error Handling
+- If an API call fails **due to timeout**, respond:
+  “The model API did not respond in time. Please try again in about 60 seconds.”
+- Do **not** invent results or repeat a stale prediction.
+- Keep the sheet state unchanged until a successful API response is received.
 
 ## Worked Example
 {
