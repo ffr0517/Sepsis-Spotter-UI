@@ -5,7 +5,8 @@ import gradio as gr
 
 def new_state():
     # brand-new per-conversation state
-    return {"sheet": None, "conv_id": None, "session": str(uuid.uuid4())}
+    return {"sheet": None, "conv_id": None, "session": str(uuid.uuid4()), "awaiting_consent": False}
+
 
 import logging, sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -436,6 +437,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
 
         # If model didn't supply a next question, try to prompt for the next missing S1 field
         missing, warnings = validate_complete(sheet["features"]["clinical"])
+        state["awaiting_consent"] = (len(missing) == 0)
         if stage_hint == "S1" or stage_hint == "auto":
             if missing:
                 next_required = missing[0]
@@ -448,9 +450,17 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         if warnings:
             nxt += "\n\n⚠️ " + " ".join(warnings)
 
-        return state, nxt
+        if state.get("awaiting_consent"):
+            new_keys = set(((cmd or {}).get("features") or {}).get("clinical", {}).keys())
+            have_keys = set(sheet["features"]["clinical"].keys())
+        if new_keys.issubset(have_keys):
+            nxt = (message or "I have what I need.") + "\n\nShall I run S1 now?"
+            return state, nxt
 
     if action == "call_api":
+        user_ok = bool(re.search(r"\b(yes|run|proceed|go ahead|call s1|run s1)\b", (user_text or "").lower()))
+        if not state.get("awaiting_consent") and not user_ok:
+            return state, "I’m ready to run S1. Please confirm: shall I run it now?"
         stage = (cmd or {}).get("stage") or "auto"
         # Merge any features the tool call included
         feats = (cmd or {}).get("features") or {}
@@ -514,15 +524,16 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             s1 = call_s1(sheet["features"]["clinical"])
             sheet["s1"] = s1
             state["sheet"] = sheet
-            # Chat reply: decision only (no JSON dump)
-            summary = f"**S1 decision:** {s1.get('s1_decision')}"
-            return state, summary
+            state["awaiting_consent"] = False        
+            reply = (message or "Running S1 now.") + f"\n\n**S1 decision:** {s1.get('s1_decision')}"
+            return state, reply
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
             s2 = call_s2(features)
             sheet["s2"] = s2
             state["sheet"] = sheet
-            summary = f"**S2 decision:** {s2.get('s2_decision')}"
+            state["awaiting_consent"] = False        
+            reply = (message or "Running S2 now.") + f"\n\n**S2 decision:** {s1.get('s2_decision')}"
             return state, summary
         else:
             return state, "Unknown stage."
@@ -600,8 +611,11 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         }],
         text={"verbosity": "low"},          # "low" | "medium" | "high"
         reasoning={"effort": "low"},        # "low" | "medium" | "high"
-        store = False
+        parallel_tool_calls=False,   # <— add
+        max_tool_calls=1,            # <— add
+        store=False
 )
+
 
     say = ""
     cmds = []
@@ -611,7 +625,7 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
             for c in (getattr(item, "content", []) or []):
                 if getattr(c, "type", "") == "output_text":
-                    say += (getattr(c, "text", "") or "")
+                    say = (getattr(c, "text", "") or "")
 
         # Tool calls (may be multiple)
         if getattr(item, "type", "") in ("function_call", "tool_call") and getattr(item, "name", "") == "sepsis_command":
