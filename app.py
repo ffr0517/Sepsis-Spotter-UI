@@ -55,6 +55,8 @@ After any {"action":"update_sheet"}, if S1 essentials are present (age, sex, hea
 3) Explicitly list any assumptions you made (e.g., “Assuming duration of illness = 1 day based on ‘fever yesterday’.”).
 4) End with one plain question asking for consent, e.g., “Shall I run S1 now?”
 
+After the user explicitly consents (e.g., “yes”, “run S1”), your very next turn must be a single call_api tool call (stage “S1”). Do not send another update_sheet or a normal assistant message first.
+
 Do NOT emit {"action":"call_api"} until the user consents.
 
 ## Intake & Validation
@@ -238,6 +240,29 @@ TOOL_SPEC = [{
 # --------------------------------
 # Config via env (set in Spaces → Settings → Variables)
 # --------------------------------
+S1_FIELDS = [
+    "age.months","sex","bgcombyn","adm.recent","wfaz","waste","stunt",
+    "cidysymp","prior.care","travel.time.bin","diarrhoeal","pneumo","sev.pneumo",
+    "ensapro","vomit.all","seiz","pfacleth","not.alert","danger.sign",
+    "hr.all","rr.all","oxy.ra","envhtemp","crt.long","parenteral_screen","SIRS_num"
+]
+
+def build_s1_payload(clinical_in: dict) -> dict:
+    out = {}
+    for k in S1_FIELDS:
+        v = clinical_in.get(k, None)
+        if v is None:
+            # placeholders: binary -> 0, continuous -> 0.0 (we’ll treat by name)
+            if k in {"sex","bgcombyn","adm.recent","waste","stunt","prior.care","travel.time.bin",
+                     "diarrhoeal","pneumo","sev.pneumo","ensapro","vomit.all","seiz","pfacleth",
+                     "not.alert","danger.sign","crt.long","parenteral_screen","SIRS_num"}:
+                out[k] = 0
+            else:
+                out[k] = 0.0
+        else:
+            out[k] = v
+    return out
+
 API_S1 = os.getenv("SEPSIS_API_URL_S1", "https://sepsis-spotter-beta.onrender.com/s1_infer")
 API_S2 = os.getenv("SEPSIS_API_URL_S2", "https://sepsis-spotter-beta.onrender.com/s2_infer")
 
@@ -326,11 +351,13 @@ def merge_sheet(sheet, add_clin, add_labs):
 # --------------------------------
 def call_s1(clinical):
     try:
-        r = requests.post(API_S1, json={"features": clinical}, timeout=30)
+        payload = build_s1_payload(clinical)
+        r = requests.post(API_S1, json={"features": payload}, timeout=30)
         r.raise_for_status()
         return r.json()
     except requests.RequestException as e:
         raise RuntimeError(f"S1 endpoint unavailable or returned an error: {e}") from e
+
 
 def call_s2(features):
     try:
@@ -425,6 +452,41 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     action = (cmd or {}).get("action")
     message = (cmd or {}).get("message") or ""
 
+    # --- Consent & essentials gate ---
+    consent_patterns = r"\b(yes|yep|yeah|y|ok|okay|proceed|go ahead|run( the)? model|run s1|call s1|do it|please run)\b"
+    user_ok = bool(re.search(consent_patterns, (user_text or "").lower()))
+
+    essentials_present = False
+    try:
+        missing_req, _warn = validate_complete((sheet.get("features") or {}).get("clinical", {}))
+        essentials_present = (len(missing_req) == 0)
+    except Exception:
+        pass
+
+    def _run_s1_now():
+        # helper to actually run S1 and clear consent gate
+        miss, _warn = validate_complete(sheet["features"]["clinical"])
+        if miss:
+            return state, "Missing required fields for S1: " + ", ".join(miss) + "."
+        try:
+            # (Optional but recommended) sanitize to exact S1 keys; see fix #4 below
+            s1 = call_s1(sheet["features"]["clinical"])
+            sheet["s1"] = s1
+            state["sheet"] = sheet
+            state["awaiting_consent"] = False
+            reply = (message or "Running S1 now.") + f"\n\n**S1 decision:** {s1.get('s1_decision')}"
+            return state, reply
+        except Exception as e:
+            return state, f"Error calling S1 API: {e}"
+
+    # Short-circuits to avoid loops
+    if user_ok and essentials_present:
+        return _run_s1_now()
+
+    if state.get("awaiting_consent") and essentials_present and action in ("ask", "update_sheet") and not user_ok:
+        return state, (message or "I have what I need.") + "\n\nShall I run S1 now?"
+
+
     if action == "ask":
         # Just pass the model's concise question through
         state["sheet"] = sheet
@@ -435,10 +497,11 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         sheet = merge_features(sheet, feats)
         state["sheet"] = sheet
 
-        # If model didn't supply a next question, try to prompt for the next missing S1 field
+        # Determine next prompt and consent status
         missing, warnings = validate_complete(sheet["features"]["clinical"])
         state["awaiting_consent"] = (len(missing) == 0)
-        if stage_hint == "S1" or stage_hint == "auto":
+
+        if stage_hint in ("S1", "auto"):
             if missing:
                 next_required = missing[0]
                 nxt = f"{message}\n\nCould you provide **{next_required}**?"
@@ -450,12 +513,11 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         if warnings:
             nxt += "\n\n⚠️ " + " ".join(warnings)
 
-        if state.get("awaiting_consent"):
-            new_keys = set(((cmd or {}).get("features") or {}).get("clinical", {}).keys())
-            have_keys = set(sheet["features"]["clinical"].keys())
-        if new_keys.issubset(have_keys):
+        # If we now have all essentials, explicitly ask for consent once
+        if state["awaiting_consent"]:
             nxt = (message or "I have what I need.") + "\n\nShall I run S1 now?"
-            return state, nxt
+
+        return state, nxt
 
     if action == "call_api":
         user_ok = bool(re.search(r"\b(yes|run|proceed|go ahead|call s1|run s1)\b", (user_text or "").lower()))
@@ -466,6 +528,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         feats = (cmd or {}).get("features") or {}
         sheet = merge_features(sheet, feats)
         state["sheet"] = sheet
+        state["awaiting_consent"] = False
 
         # Choose stage
         if stage == "auto":
@@ -524,17 +587,17 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             s1 = call_s1(sheet["features"]["clinical"])
             sheet["s1"] = s1
             state["sheet"] = sheet
-            state["awaiting_consent"] = False        
-            reply = (message or "Running S1 now.") + f"\n\n**S1 decision:** {s1.get('s1_decision')}"
+            state["awaiting_consent"] = False
+            reply = "Running S1 now.\n\n**S1 decision:** " + str(s1.get("s1_decision"))
             return state, reply
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
             s2 = call_s2(features)
             sheet["s2"] = s2
             state["sheet"] = sheet
-            state["awaiting_consent"] = False        
-            reply = (message or "Running S2 now.") + f"\n\n**S2 decision:** {s1.get('s2_decision')}"
-            return state, summary
+            state["awaiting_consent"] = False
+            reply = "Running S2 now.\n\n**S2 decision:** " + str(s2.get("s2_decision"))
+            return state, reply
         else:
             return state, "Unknown stage."
     except Exception as e:
