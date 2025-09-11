@@ -591,7 +591,6 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         }],
         text={"verbosity": "low"},          # "low" | "medium" | "high"
         reasoning={"effort": "low"},        # "low" | "medium" | "high"
-        metadata={"session": session_id},    # e.g., thread your state["session"] in
         store = False
 )
 
