@@ -1,4 +1,11 @@
-import os, re, json, time, requests, gradio as gr
+import os, re, json, time, uuid
+import requests
+import gradio as gr
+
+
+def new_state():
+    # brand-new per-conversation state
+    return {"sheet": None, "conv_id": None, "session": str(uuid.uuid4())}
 
 import logging, sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
@@ -381,8 +388,6 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
 
     # Try the agent (LLM) path, and cleanly fall back if anything goes wrong
     say, cmds, new_conv, err = safe_agent_step(user_text, sheet, state.get("conv_id"))
-    if new_conv:
-        state["conv_id"] = new_conv
 
     if err:
         # Fall back to legacy, but tell the user what happened (briefly)
@@ -584,12 +589,13 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
                 "additionalProperties": False,
             },
         }],
-        # conversation=conv_id,  # optional; omit unless you really want server-side memory
+        temperature=0,
+          store=False,                  
+          metadata={"session": sheet.get("session")},
     )
 
     say = ""
     cmds = []
-    new_conv_id = getattr(resp, "conversation", None).id if getattr(resp, "conversation", None) else None
 
     for item in (resp.output or []):
         # Assistant text (if any)
@@ -615,22 +621,24 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
         log.info("[RESPONSES CMDS] %s", json.dumps(cmds, indent=2))
         log.info("[SHEET] %s", json.dumps(sheet, indent=2))
 
-    return (say.strip() or None), cmds, (new_conv_id or conv_id)
+    return (say.strip() or None), cmds, conv_id
 
 
 # --------------------------------
 # In-app Login + Gradio UI (uses SPACE_USER / SPACE_PASS)
 # --------------------------------
-SPACE_USER = os.getenv("SPACE_USER", "user")   # set in HF Space → Settings → Variables & secrets
+SPACE_USER = os.getenv("SPACE_USER", "user")  
 SPACE_PASS = os.getenv("SPACE_PASS", "pass")
 
 def check_login(u, p):
     ok = (u == SPACE_USER) and (p == SPACE_PASS)
-    # Hide login, show app if ok; otherwise show error
+    # if ok, nuke any prior session state
+    new_st = new_state() if ok else gr.update()
     return (
-        gr.update(visible=not ok),   # login_view
-        gr.update(visible=ok),       # app_view
-        ("" if ok else "Invalid username or password.")
+        gr.update(visible=not ok),    
+        gr.update(visible=ok),        
+        ("" if ok else "Invalid username or password."), 
+        new_st   
     )
 
 
@@ -657,16 +665,22 @@ with gr.Blocks(fill_height=True) as ui:
                 )
                 use_llm_chk = gr.Checkbox(value=USE_LLM_DEFAULT, label="Use OpenAI LLM (agent mode)")
                 with gr.Row():
-                    btn_run = gr.Button("Run")  # single button, always 'auto'
+                    btn_run = gr.Button("Run")
+                    btn_new = gr.Button("New chat")   # <-- add this
             with gr.Column(scale=2):
                 info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
                 merge_btn = gr.Button("Merge")
                 tips = gr.Markdown("")
 
-        state = gr.State({"sheet": None, "conv_id": None})
+        # state must exist before any wiring that references it
+        state = gr.State(new_state())  # <-- move this up
 
         # --- callbacks ---
+        def reset_all():
+            # chat, state, info, paste, tips
+            return [], new_state(), "", "", ""
+
         def on_user_send(history, text):
             history = history + [{"role": "user", "content": text}]
             return history, ""
@@ -693,7 +707,7 @@ with gr.Blocks(fill_height=True) as ui:
             return st, "Merged.", json.dumps(st["sheet"], indent=2)
 
         # --- wiring (after widgets exist) ---
-        login_btn.click(check_login, [u, p], [login_view, app_view, login_msg])
+        login_btn.click(check_login, [u, p], [login_view, app_view, login_msg, state])
 
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
@@ -702,6 +716,13 @@ with gr.Blocks(fill_height=True) as ui:
             on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
         )
         merge_btn.click(on_merge, [state, paste], [state, tips, info])
+
+        # wire New chat after state exists
+        btn_new.click(
+            reset_all,
+            inputs=None,
+            outputs=[chat, state, info, paste, tips]
+        )
 
 # ---- Launch settings: Spaces vs local ---------------------------------
 IS_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID") or os.getenv("SYSTEM") == "spaces")
