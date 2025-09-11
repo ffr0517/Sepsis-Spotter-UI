@@ -505,7 +505,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
             sheet["s1"] = s1
             state["sheet"] = sheet
             state["awaiting_consent"] = False
-            reply = (message or "Running S1 now.") + f"\n\n**S1 decision:** {s1.get('s1_decision')}"
+            reply = (message or "Running S1 now.") + "\n\n" + format_s1_decision(s1.get("s1_decision"))
             return state, reply
         except Exception as e:
             return state, f"Error calling S1 API: {e}"
