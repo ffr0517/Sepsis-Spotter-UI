@@ -346,6 +346,37 @@ def merge_sheet(sheet, add_clin, add_labs):
     out.setdefault("features", {}).setdefault("labs", {}).update(add_labs or {})
     return out
 
+def _normalize_decision(val):
+    # Accept "Severe", "NOTSevere", "Other", ["Severe"], etc.
+    if isinstance(val, (list, tuple)) and val:
+        val = val[0]
+    val = (val or "").strip()
+    return val
+
+S1_DISCLAIMER = (
+    "This is clinical decision support, not a diagnosis. You must use your own clinical judgment, "
+    "training, and knowledge to make referral or treatment decisions. No liability is accepted."
+)
+
+def format_s1_decision(decision):
+    d = _normalize_decision(decision)
+    # normalize case but keep exact matching keys
+    key = d.replace(" ", "").upper()
+    if key == "SEVERE":
+        body = ("S1 decision: SEVERE. According to historical data and model specifics, the given "
+                "patient’s symptoms suggest a severe outcome within 48 hours. That is, death/receipt of "
+                "organ support/discharged home to die within 48 hours.")
+    elif key in ("NOTSEVERE", "NOTSEVERE."):  # tolerate punctuation
+        body = ("S1 decision: NOT SEVERE. According to historical data and model specifics, the given "
+                "patient’s symptoms suggest a non-severe disease. That is, no admittance to any health "
+                "facility, and symptoms resolved within 28 days.")
+    else:
+        # default to OTHER if unknown
+        body = ("S1 decision: OTHER. According to historical data and model specifics, laboratory "
+                "tests/biomarkers are required to make a more informed outcome prediction. Please note "
+                "that the model incorporating laboratory results and biomarkers is NOT currently available.")
+    return f"{body}\n\n{S1_DISCLAIMER}"
+
 # --------------------------------
 # Model calls
 # --------------------------------
@@ -544,7 +575,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
                 s1 = call_s1(sheet["features"]["clinical"])
                 sheet["s1"] = s1
                 state["sheet"] = sheet
-                reply = (message or "Running S1 now.") + f"\n\n**S1 decision:** {s1.get('s1_decision')}"
+                reply = (message or "Running S1 now.") + "\n\n" + format_s1_decision(s1.get("s1_decision"))
                 return state, reply
             except Exception as e:
                 return state, f"Error calling S1 API: {e}"
@@ -588,7 +619,7 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             sheet["s1"] = s1
             state["sheet"] = sheet
             state["awaiting_consent"] = False
-            reply = "Running S1 now.\n\n**S1 decision:** " + str(s1.get("s1_decision"))
+            reply = "Running S1 now.\n\n" + format_s1_decision(s1.get("s1_decision"))
             return state, reply
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
