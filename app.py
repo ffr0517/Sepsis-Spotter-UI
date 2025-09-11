@@ -589,10 +589,11 @@ def agent_step(user_text: str, sheet: dict | None, conv_id: str | None):
                 "additionalProperties": False,
             },
         }],
-        temperature=0,
-          store=False,                  
-          metadata={"session": sheet.get("session")},
-    )
+        text={"verbosity": "low"},          # "low" | "medium" | "high"
+        reasoning={"effort": "low"},        # "low" | "medium" | "high"
+        metadata={"session": session_id},    # e.g., thread your state["session"] in
+        store = False
+)
 
     say = ""
     cmds = []
