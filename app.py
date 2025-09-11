@@ -789,6 +789,12 @@ with gr.Blocks(fill_height=True) as ui:
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
                 merge_btn = gr.Button("Merge")
                 tips = gr.Markdown("")
+                gr.Markdown(
+                    "[Sepsis-Spotter-UI repo](https://github.com/lcmrhodes98/Sepsis-Spotter-UI) · "
+                    "[Sepsis-Spotter model repo](https://github.com/lcmrhodes98/Sepsis-Spotter)\n\n"
+                    "For more information please contact "
+                    "[lcmrhodes98@gmail.com](mailto:lcmrhodes98@gmail.com)"
+                )
 
         # state must exist before any wiring that references it
         state = gr.State(new_state())  # <-- move this up
