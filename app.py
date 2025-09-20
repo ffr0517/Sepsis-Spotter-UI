@@ -18,6 +18,8 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 
 USE_LLM_DEFAULT = True  # default for the UI checkbox
 
+PARSER_MODE = os.getenv("PARSER_MODE", "llm_only").strip().lower()
+
 # ------------------------------
 # Agent system prompt (LLM is the orchestrator)
 # ------------------------------
@@ -712,11 +714,12 @@ def run_pipeline(state, user_text, stage="auto", use_llm=True):
     state = state or {"sheet": None, "conv_id": None}
     sheet = state.get("sheet") or new_sheet()
 
-    # Always parse/merge from user text first
-    clin_new, labs_new, _ = extract_features(user_text or "")
-    if clin_new or labs_new:
-        sheet = merge_sheet(sheet, clin_new, labs_new)
-        state["sheet"] = sheet
+    # Intake: if LLM is on and PARSER_MODE=llm_only, let the agent parse.
+    if not use_llm or not llm_available() or PARSER_MODE != "llm_only":
+        clin_new, labs_new, _ = extract_features(user_text or "")
+        if clin_new or labs_new:
+            sheet = merge_sheet(sheet, clin_new, labs_new)
+            state["sheet"] = sheet
 
     # If user disabled LLM or API key missing, go legacy immediately
     if not use_llm or not llm_available():
