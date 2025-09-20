@@ -191,7 +191,7 @@ After receiving an API response with a decision, always present the prediction u
   “S1 decision: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms suggest a non-severe disease. That is, no admittance to any health facility, and symptoms resolved within 28 days.”
 
 - If **Other**:  
-  “S1 decision: OTHER. According to historical data and model specifics, laboratory tests/biomarkers are required to make a more informed outcome prediction. Please note that the model incorporating laboratory results and biomarkers is NOT currently available.”
+  “S1 decision: OTHER. According to historical data and model specifics, laboratory tests/biomarkers are required to make a more informed outcome prediction.”
 
 Always follow with the disclaimer:
 “This is clinical decision support, not a diagnosis. You must use your own clinical judgment, training, and knowledge to make referral or treatment decisions. No liability is accepted.”
