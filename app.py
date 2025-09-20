@@ -358,82 +358,79 @@ def validate_complete(clinical: dict):
 # --------------------------------
 def extract_features(text: str):
     clinical, labs, notes = {}, {}, []
-    t = text or ""
+    t = (text or "").strip()
 
-    # age: years or months
+    # --- Age: years or months ---
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?|y)\b", t, re.I)
     if m: clinical["age.months"] = float(m.group(1)) * 12
     m = re.search(r"(\d+(?:\.\d+)?)\s*(?:months?|mos?|mo)\b", t, re.I)
     if m: clinical["age.months"] = float(m.group(1))
 
-    # sex
+    # --- Sex ---
     if re.search(r"\bmale\b|\bboy\b", t, re.I): clinical["sex"] = 1
     if re.search(r"\bfemale\b|\bgirl\b", t, re.I): clinical["sex"] = 0
 
-    # vitals
+    # --- Overnight hospitalisation within last 6 months -> adm.recent ---
+    # Affirmative
+    if "adm.recent" not in clinical and re.search(
+        r"(?:overnight|over\s*night)\s+(?:hospitali[sz]ation|admission)\b.*?(?:last|past)\s*(?:six|6)\s*months",
+        t, re.I
+    ):
+        clinical["adm.recent"] = 1
+    # Negative
+    if "adm.recent" not in clinical and re.search(
+        r"\b(?:no|none|not)\s+(?:had|have)\s+(?:an?\s+)?(?:overnight\s+)?(?:hospitali[sz]ation|admission)\b.*?(?:last|past)\s*(?:six|6)\s*months",
+        t, re.I
+    ):
+        clinical["adm.recent"] = 0
+
+    # --- Weight-for-age Z-score (WFA z) -> wfaz ---
+    m = re.search(r"weight\s*for\s*age\s*z\s*-?\s*score\s*(?:is|:)?\s*(-?\d+(?:\.\d+)?)", t, re.I)
+    if not m:
+        m = re.search(r"\bwfaz\b\s*[:=]\s*(-?\d+(?:\.\d+)?)", t, re.I)
+    if m: clinical["wfaz"] = float(m.group(1))
+
+    # --- Illness duration (days) -> cidysymp ---
+    m = re.search(r"(?:duration of (?:illness|symptoms?)|illness duration)\s*(?:is|:)?\s*(\d+(?:\.\d+)?)\s*(?:days?|d)\b", t, re.I)
+    if m: clinical["cidysymp"] = int(float(m.group(1)))
+
+    # --- Not alert (AVPU<A) -> not.alert ---
+    if re.search(r"\bnot alert\b|\bAVPU\b.*?<\s*A", t, re.I):
+        clinical["not.alert"] = 1
+
+    # --- Capillary refill -> crt.long ---
+    if re.search(r"cap(?:illary)?\s*refill.*?(?:>\s*2|greater than\s*2)\s*s(?:ec(?:onds)?)?", t, re.I) \
+       or re.search(r"\bprolonged cap(?:illary)? refill\b", t, re.I):
+        clinical["crt.long"] = 1
+    elif re.search(r"cap(?:illary)?\s*refill.*?(?:<\s*2|≤\s*2|less than\s*2)\s*s(?:ec(?:onds)?)?", t, re.I) \
+         or re.search(r"\bcapillary refill (?:normal|within\s*2\s*s(?:ec(?:onds)?)?)\b", t, re.I):
+        clinical["crt.long"] = 0
+
+    # --- Temperature (axillary/temperature ... °C) -> envhtemp ---
+    m = re.search(r"(?:axillary\s+temperature|temperature)\s*(?:in\s*celsius)?\s*(?:is|:)?\s*([0-9]{2}(?:\.[0-9]+)?)", t, re.I)
+    if m: clinical["envhtemp"] = float(m.group(1))
+
+    # --- Heart rate -> hr.all ---
     m = re.search(r"\bHR[:\s]*([0-9]{2,3})\b", t, re.I)
+    if not m:
+        m = re.search(r"heart\s*rate\s*(?:is|:)?\s*([0-9]{2,3})\s*bpm", t, re.I)
     if m: clinical["hr.all"] = int(m.group(1))
+
+    # --- Respiratory rate -> rr.all ---
     m = re.search(r"\bRR[:\s]*([0-9]{1,3})\b", t, re.I)
+    if not m:
+        m = re.search(r"respiratory\s*rate\s*(?:is|:)?\s*([0-9]{1,3})\s*(?:/min|breaths?/min)", t, re.I)
     if m: clinical["rr.all"] = int(m.group(1))
 
-    # --- SpO2 / oxygen saturation ---
-    # Case A: term first → number after (e.g., "SpO2 96", "oxygen saturation 96%")
-    m = re.search(r"(?:SpO2|SpO₂|sats?|oxygen(?:\s+saturation)?)[:\s]*([0-9]{2,3})(?:\s*%)?\b", t, re.I)
-    if m:
-        clinical["oxy.ra"] = int(m.group(1))
-    else:
-        # Case B: number first → term after (e.g., "96% oxygen saturation", "96% oxygen")
-        m = re.search(r"\b([0-9]{2,3})\s*%(?:\s*(?:on\s+room\s+air|RA))?\s*(?:oxygen(?:\s+saturation)?|SpO2|SpO₂|sats?)\b", t, re.I)
+    # --- Oxygen saturation on room air (optional for S1, needed for S2 sets) -> oxy.ra ---
+    m = re.search(r"(?:SpO2|SpO₂|sats?|oxygen|sat)[^\d]{0,6}([0-9]{2,3})\s*%?", t, re.I)
+    if m: clinical["oxy.ra"] = int(m.group(1))
+
+    # --- Labs (keep your existing list) ---
+    for k in LAB_KEYS:
+        m = re.search(fr"\b{k}\b[:\s]*(-?\d+(?:\.\d+)?)", t, re.I)
         if m:
-            clinical["oxy.ra"] = int(m.group(1))
-
-    # common flags
-    if re.search(r"\bdanger sign(s)?\b", t, re.I): clinical["danger.sign"] = 1
-    if re.search(r"\bnot alert\b|\bletharg(y|ic)\b|\bdrows(y|iness)\b", t, re.I): clinical["not.alert"] = 1
-    if re.search(r"\bURTI\b|\bupper resp", t, re.I): clinical["urti"] = 1
-    if re.search(r"\bLRTI\b|\blower resp|\bpneumonia\b", t, re.I): clinical["lrti"] = 1
-    if re.search(r"\bdiarrh", t, re.I): clinical["diarrhoeal"] = 1
-    m = re.search(r"\bcrt[:\s]*([0-9](?:\.[0-9])?)\b", t, re.I)
-    if m: clinical["crt.long"] = 1 if float(m.group(1)) >= 3 else 0
-
-    # --- Labs with aliases ---
-    # Map many phrasings to canonical keys used by your API
-    LAB_ALIASES = [
-        # canonical,            regex that matches in text
-        ("CRP",                 r"\b(?:CRP|C[-\s]*reactive\s*protein)\b"),
-        ("CXCl10",              r"\b(?:CXCL?10)\b"),               # tolerate CXCL10 or CXCl10
-        ("IL6",                 r"\b(?:IL[-\s]*6|Interleukin[-\s]*6)\b"),
-        ("IL10",                r"\b(?:IL[-\s]*10|Interleukin[-\s]*10)\b"),
-        ("IL1ra",               r"\b(?:IL[-\s]*1RA|IL1RA|IL[-\s]*1\s*receptor\s*antagonist)\b"),
-        ("IL8",                 r"\b(?:IL[-\s]*8|Interleukin[-\s]*8)\b"),
-        ("PROC",                r"\b(?:PCT|Procalcitonin)\b"),
-        ("TNFR1",               r"\b(?:TNF\s*R?1|TNFR1|s?TNF[-\s]*receptor[-\s]*1)\b"),
-        ("supar",               r"\b(?:su?PAR)\b"),
-        ("ANG1",                r"\bANG(?:I|1)\b"),
-        ("ANG2",                r"\bANG(?:II|2)\b"),
-        ("CHI3L",               r"\bCHI3L1?\b"),
-        ("STREM1",              r"\bs?TREM[-\s]*1\b"),
-        ("VEGFR1",              r"\bVEGFR[-\s]*1\b"),
-        ("lblac",               r"\b(?:Lactate)\b"),
-        ("lbglu",               r"\b(?:Glucose)\b"),
-        ("enescbchb1",          r"\b(?:Haemoglobin|Hemoglobin|Hgb)\b"),
-    ]
-
-    # helper to pull the first numeric value after a matched alias
-    def _grab_value_after(pattern: str):
-        # match "... <alias> : 12.3" or "... <alias> = 12.3" or "... <alias> 12.3"
-        m = re.search(pattern + r"[^0-9\-]*(-?[0-9]+(?:\.[0-9]+)?)", t, re.I)
-        if m:
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
-        return None
-
-    for canon, alias_rx in LAB_ALIASES:
-        val = _grab_value_after(alias_rx)
-        if val is not None:
-            labs[canon] = val
+            labs[k] = float(m.group(1))
 
     return clinical, labs, notes
 
