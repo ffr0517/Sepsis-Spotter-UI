@@ -1064,6 +1064,11 @@ with gr.Blocks(fill_height=True) as ui:
                     "For more information please contact "
                     "[lcmrhodes98@gmail.com](mailto:lcmrhodes98@gmail.com)"
                 )
+                gr.Markdown(
+                "<div style='margin-top:8px; font-size:12px; color:#6b7280;'>"
+                "Errors related to timeout may occur on first use. Try again after ~1 minute if this happens."
+                "</div>"
+            )
 
         # state must exist before any wiring that references it
         state = gr.State(new_state())  # <-- move this up
