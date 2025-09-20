@@ -90,7 +90,7 @@ Do NOT emit {"action":"call_api"} until the user consents.
 
   If you have more information S1 can also use, please include any of: comorbidity, wasting, stunting, prior care, travel time ≤1h, diarrhoeal syndrome, WHO pneumonia or severe pneumonia, prostration, intractable vomiting, convulsions, lethargy, IMCI danger sign, parenteral treatment before enrolment, and SIRS score.
 
-  I'll proceed with when I have these essentials. Let me know if you have any questions.
+  Let me know if you have any questions.
 
 - If the input **omits essentials**, emit a single `ask` that gently nudges for the missing pieces.
 - When essentials are present, emit `call_api` with the **full S1 payload** (fill unknowns with placeholders as specified below).
@@ -307,38 +307,82 @@ LAB_KEYS = [
 # --------------------------------
 def extract_features(text: str):
     clinical, labs, notes = {}, {}, []
+    t = text or ""
 
     # age: years or months
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?|y)\b", text, re.I)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?|y)\b", t, re.I)
     if m: clinical["age.months"] = float(m.group(1)) * 12
-    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:months?|mos?|mo)\b", text, re.I)
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:months?|mos?|mo)\b", t, re.I)
     if m: clinical["age.months"] = float(m.group(1))
 
     # sex
-    if re.search(r"\bmale\b|\bboy\b", text, re.I): clinical["sex"] = 1
-    if re.search(r"\bfemale\b|\bgirl\b", text, re.I): clinical["sex"] = 0
+    if re.search(r"\bmale\b|\bboy\b", t, re.I): clinical["sex"] = 1
+    if re.search(r"\bfemale\b|\bgirl\b", t, re.I): clinical["sex"] = 0
 
     # vitals
-    m = re.search(r"\bHR[:\s]*([0-9]{2,3})\b", text, re.I)
+    m = re.search(r"\bHR[:\s]*([0-9]{2,3})\b", t, re.I)
     if m: clinical["hr.all"] = int(m.group(1))
-    m = re.search(r"\bRR[:\s]*([0-9]{1,3})\b", text, re.I)
+    m = re.search(r"\bRR[:\s]*([0-9]{1,3})\b", t, re.I)
     if m: clinical["rr.all"] = int(m.group(1))
-    m = re.search(r"(?:SpO2|SpO₂|sats?|oxygen|sat)[:\s]*([0-9]{2,3})\b", text, re.I)
-    if m: clinical["oxy.ra"] = int(m.group(1))
+
+    # --- SpO2 / oxygen saturation ---
+    # Case A: term first → number after (e.g., "SpO2 96", "oxygen saturation 96%")
+    m = re.search(r"(?:SpO2|SpO₂|sats?|oxygen(?:\s+saturation)?)[:\s]*([0-9]{2,3})(?:\s*%)?\b", t, re.I)
+    if m:
+        clinical["oxy.ra"] = int(m.group(1))
+    else:
+        # Case B: number first → term after (e.g., "96% oxygen saturation", "96% oxygen")
+        m = re.search(r"\b([0-9]{2,3})\s*%(?:\s*(?:on\s+room\s+air|RA))?\s*(?:oxygen(?:\s+saturation)?|SpO2|SpO₂|sats?)\b", t, re.I)
+        if m:
+            clinical["oxy.ra"] = int(m.group(1))
 
     # common flags
-    if re.search(r"\bdanger sign(s)?\b", text, re.I): clinical["danger.sign"] = 1
-    if re.search(r"\bnot alert\b|\bletharg(y|ic)\b|\bdrows(y|iness)\b", text, re.I): clinical["not.alert"] = 1
-    if re.search(r"\bURTI\b|\bupper resp", text, re.I): clinical["urti"] = 1
-    if re.search(r"\bLRTI\b|\blower resp|\bpneumonia\b", text, re.I): clinical["lrti"] = 1
-    if re.search(r"\bdiarrh", text, re.I): clinical["diarrhoeal"] = 1
-    m = re.search(r"\bcrt[:\s]*([0-9](?:\.[0-9])?)\b", text, re.I)
+    if re.search(r"\bdanger sign(s)?\b", t, re.I): clinical["danger.sign"] = 1
+    if re.search(r"\bnot alert\b|\bletharg(y|ic)\b|\bdrows(y|iness)\b", t, re.I): clinical["not.alert"] = 1
+    if re.search(r"\bURTI\b|\bupper resp", t, re.I): clinical["urti"] = 1
+    if re.search(r"\bLRTI\b|\blower resp|\bpneumonia\b", t, re.I): clinical["lrti"] = 1
+    if re.search(r"\bdiarrh", t, re.I): clinical["diarrhoeal"] = 1
+    m = re.search(r"\bcrt[:\s]*([0-9](?:\.[0-9])?)\b", t, re.I)
     if m: clinical["crt.long"] = 1 if float(m.group(1)) >= 3 else 0
 
-    # labs (simple)
-    for k in LAB_KEYS:
-        m = re.search(fr"\b{k}\b[:\s]*([0-9]+(?:\.[0-9]+)?)", text, re.I)
-        if m: labs[k] = float(m.group(1))
+    # --- Labs with aliases ---
+    # Map many phrasings to canonical keys used by your API
+    LAB_ALIASES = [
+        # canonical,            regex that matches in text
+        ("CRP",                 r"\b(?:CRP|C[-\s]*reactive\s*protein)\b"),
+        ("CXCl10",              r"\b(?:CXCL?10)\b"),               # tolerate CXCL10 or CXCl10
+        ("IL6",                 r"\b(?:IL[-\s]*6|Interleukin[-\s]*6)\b"),
+        ("IL10",                r"\b(?:IL[-\s]*10|Interleukin[-\s]*10)\b"),
+        ("IL1ra",               r"\b(?:IL[-\s]*1RA|IL1RA|IL[-\s]*1\s*receptor\s*antagonist)\b"),
+        ("IL8",                 r"\b(?:IL[-\s]*8|Interleukin[-\s]*8)\b"),
+        ("PROC",                r"\b(?:PCT|Procalcitonin)\b"),
+        ("TNFR1",               r"\b(?:TNF\s*R?1|TNFR1|s?TNF[-\s]*receptor[-\s]*1)\b"),
+        ("supar",               r"\b(?:su?PAR)\b"),
+        ("ANG1",                r"\bANG(?:I|1)\b"),
+        ("ANG2",                r"\bANG(?:II|2)\b"),
+        ("CHI3L",               r"\bCHI3L1?\b"),
+        ("STREM1",              r"\bs?TREM[-\s]*1\b"),
+        ("VEGFR1",              r"\bVEGFR[-\s]*1\b"),
+        ("lblac",               r"\b(?:Lactate)\b"),
+        ("lbglu",               r"\b(?:Glucose)\b"),
+        ("enescbchb1",          r"\b(?:Haemoglobin|Hemoglobin|Hgb)\b"),
+    ]
+
+    # helper to pull the first numeric value after a matched alias
+    def _grab_value_after(pattern: str):
+        # match "... <alias> : 12.3" or "... <alias> = 12.3" or "... <alias> 12.3"
+        m = re.search(pattern + r"[^0-9\-]*(-?[0-9]+(?:\.[0-9]+)?)", t, re.I)
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+        return None
+
+    for canon, alias_rx in LAB_ALIASES:
+        val = _grab_value_after(alias_rx)
+        if val is not None:
+            labs[canon] = val
 
     return clinical, labs, notes
 
@@ -433,21 +477,40 @@ def _compute_meta_from_s1(s1_json: dict) -> dict:
 def _validated_set_name(features: dict) -> str | None:
     """
     Return 'A', 'B', 'full_lab_panel', or None based on available features.
-    Requires oxy.ra presence for A/B.
+    Requires non-placeholder oxy.ra for A/B (not 0/0.0/empty/None).
     """
     f = features or {}
-    def has(k): return (k in f) and (f[k] is not None)
+
+    def provided(k):
+        if k not in f:
+            return False
+        v = f[k]
+        if v is None:
+            return False
+        if isinstance(v, str) and v.strip() == "":
+            return False
+        # Treat explicit placeholders as not provided
+        if v == 0 or v == 0.0:
+            return False
+        return True
 
     # Validated Set A
-    if all(has(k) for k in ("CRP", "TNFR1", "supar", "oxy.ra")):
+    if provided("CRP") and provided("TNFR1") and provided("supar") and provided("oxy.ra"):
         return "A"
+
     # Validated Set B
-    if all(has(k) for k in ("CRP", "CXCl10", "IL6", "oxy.ra")):
+    if provided("CRP") and provided("CXCl10") and provided("IL6") and provided("oxy.ra"):
         return "B"
-    # Full lab panel heuristic: many labs (≥6) present (besides oxy.ra)
-    lab_count = len([k for k in f.keys() if k in LAB_KEYS])
+
+    # Heuristic: "full lab panel" if many labs (≥6) present
+    LAB_KEYS = [
+        "CRP","TNFR1","supar","CXCl10","IL6","IL10","IL1ra","IL8","PROC",
+        "ANG1","ANG2","CHI3L","STREM1","VEGFR1","lblac","lbglu","enescbchb1"
+    ]
+    lab_count = sum(1 for k in LAB_KEYS if provided(k))
     if lab_count >= 6:
         return "full_lab_panel"
+
     return None
 
 
