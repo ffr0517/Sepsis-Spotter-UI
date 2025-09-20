@@ -534,6 +534,20 @@ def format_s1_decision(decision):
                 "tests/biomarkers are required to make a more informed outcome prediction.")
     return f"{body}\n\n{S1_DISCLAIMER}"
 
+def _s2_request_prompt() -> str:
+    """
+    What to ask the user when S1 returns 'Other'.
+    Requests a validated S2 set (or full panel) with exact units/field names.
+    """
+    return (
+        "Because Stage 1 returned “Other”, we can proceed to Stage 2 if labs are available. "
+        "Please provide either: "
+        "Validated Set B — CRP (mg/L), CXCl10 (pg/ml), IL-6 (pg/ml), and SpO₂ on room air (%); "
+        "or Validated Set A — CRP (mg/L), TNFR1 (pg/ml), suPAR (ng/ml), and SpO₂ on room air (%). "
+        "If you instead have many labs, you can share the full panel and we’ll use all available values. "
+        "Would you like to proceed to S2 with one of these options?"
+    )
+
 def _compute_meta_from_s1(s1_json: dict) -> dict:
     """
     Compute S1→S2 meta-probabilities from /s1_infer response:
@@ -754,7 +768,12 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
             sheet.setdefault("features", {}).setdefault("clinical", {}).update(_compute_meta_from_s1(s1))
             state["sheet"] = sheet
             state["awaiting_consent"] = False
-            reply = (message or "Running S1 now.") + "\n\n" + format_s1_decision(s1.get("s1_decision"))
+            decision_text = format_s1_decision(s1.get("s1_decision"))
+            reply = (message or "Running S1 now.") + "\n\n" + decision_text
+
+            d_norm = (s1.get("s1_decision") or "").strip().replace(" ", "").upper()
+            if d_norm == "OTHER":
+                reply += "\n\n" + _s2_request_prompt()
             return state, reply
         except Exception as e:
             return state, f"Error calling S1 API: {e}"
@@ -884,7 +903,13 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             sheet["features"]["clinical"].update(_compute_meta_from_s1(s1))
             state["sheet"] = sheet
             state["awaiting_consent"] = False
-            reply = "Running S1 now.\n\n" + format_s1_decision(s1.get("s1_decision"))
+            decision_text = format_s1_decision(s1.get("s1_decision"))
+            reply = "Running S1 now.\n\n" + decision_text
+
+            d_norm = (s1.get("s1_decision") or "").strip().replace(" ", "").upper()
+            if d_norm == "OTHER":
+                reply += "\n\n" + _s2_request_prompt()
+                
             return state, reply
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
