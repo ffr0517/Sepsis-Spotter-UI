@@ -106,7 +106,7 @@ When emitting `{"action":"call_api","stage":"S1"}`, include `features.clinical` 
 - `age.months` → Age in months → number → 0.0
 - `sex` → Sex (1=male, 0=female) → integer {0,1} → 0
 - `bgcombyn` → Comorbidity present → integer {0,1} → 0
-- `adm.recent` → Overnight hospitalisation last 6 mo → integer {0,1} → 0
+- `adm.recent` → Overnight hospitalisation within the last 6 months (1 = yes, 0 = no) → integer {0,1} → 0
 - `wfaz` → Weight-for-age Z-score → number → 0.0
 - `waste` → Wasting (WFL Z < −2) → integer {0,1} → 0
 - `stunt` → Stunting (LAZ < −2) → integer {0,1} → 0
