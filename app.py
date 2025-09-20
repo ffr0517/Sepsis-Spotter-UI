@@ -544,8 +544,7 @@ def format_s1_decision(decision):
     else:
         # default to OTHER if unknown
         body = ("S1 decision: OTHER. According to historical data and model specifics, laboratory "
-                "tests/biomarkers are required to make a more informed outcome prediction. Please note "
-                "that the model incorporating laboratory results and biomarkers is NOT currently available.")
+                "tests/biomarkers are required to make a more informed outcome prediction.")
     return f"{body}\n\n{S1_DISCLAIMER}"
 
 def _compute_meta_from_s1(s1_json: dict) -> dict:
