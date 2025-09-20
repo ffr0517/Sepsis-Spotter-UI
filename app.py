@@ -268,12 +268,43 @@ S1_FIELDS = [
     "hr.all","rr.all","oxy.ra","envhtemp","crt.long","parenteral_screen","SIRS_num"
 ]
 
+# Gate/ask list = validated minimal set for S1 (exact spec)
+S1_REQUIRED_MIN = [
+    "age.months",   # Age in months
+    "sex",          # 1=male, 0=female
+    "adm.recent",   # Overnight hospitalisation last 6 months (1/0)
+    "wfaz",         # Weight-for-age z-score
+    "cidysymp",     # Duration of illness (days)
+    "not.alert",    # AVPU < A (1/0)
+    "hr.all",       # Heart rate (bpm)
+    "rr.all",       # Respiratory rate (/min)
+    "envhtemp",     # Axillary temperature (°C)
+    "crt.long"      # Capillary refill >2 s (1/0)
+]
+
+# Human-readable labels for prompts
+S1_REQUIRED_LABELS = {
+    "age.months": "age (months)",
+    "sex": "sex (1 = male, 0 = female)",
+    "adm.recent": "overnight hospitalisation within the last 6 months (1 = yes, 0 = no)",
+    "wfaz": "weight-for-age z-score",
+    "cidysymp": "duration of illness (days)",
+    "not.alert": "not alert? (AVPU < A) (1 = yes, 0 = no)",
+    "hr.all": "heart rate (bpm)",
+    "rr.all": "breathing rate (/min)",
+    "envhtemp": "axillary temperature (°C)",
+    "crt.long": "capillary refill time greater than 2 seconds? (1 = yes, 0 = no)",
+}
+
+def humanize_field(key: str) -> str:
+    return S1_REQUIRED_LABELS.get(key, key.replace(".", " "))
+
 def build_s1_payload(clinical_in: dict) -> dict:
     out = {}
     for k in S1_FIELDS:
         v = clinical_in.get(k, None)
         if v is None:
-            # placeholders: binary -> 0, continuous -> 0.0 (we’ll treat by name)
+            # placeholders: binary -> 0, continuous -> 0.0
             if k in {"sex","bgcombyn","adm.recent","waste","stunt","prior.care","travel.time.bin",
                      "diarrhoeal","pneumo","sev.pneumo","ensapro","vomit.all","seiz","pfacleth",
                      "not.alert","danger.sign","crt.long","parenteral_screen","SIRS_num"}:
@@ -287,20 +318,42 @@ def build_s1_payload(clinical_in: dict) -> dict:
 API_S1 = os.getenv("SEPSIS_API_URL_S1", "https://sepsis-spotter-beta.onrender.com/s1_infer")
 API_S2 = os.getenv("SEPSIS_API_URL_S2", "https://sepsis-spotter-beta.onrender.com/s2_infer")
 
-# Required fields for S1 (adjust to your exact schema)
-REQUIRED_S1 = [
-    "age.months", "sex", "bgcombyn", "adm.recent", "wfaz",
-    "cidysymp", "hr.all", "rr.all", "envhtemp", "crt.long"
-]
-
-OPTIONAL_S1 = [
-    "wfaz","SIRS_num","crt.long","prior.care","danger.sign","not.alert",
-    "urti","lrti","diarrhoeal","envhtemp","parenteral_screen"
-]
+# S2 lab keys (names/units per your spec)
 LAB_KEYS = [
     "CRP", "TNFR1", "supar", "CXCl10", "IL6", "IL10", "IL1ra", "IL8", "PROC",
     "ANG1", "ANG2", "CHI3L", "STREM1", "VEGFR1", "lblac", "lbglu", "enescbchb1"
 ]
+
+def validate_complete(clinical: dict):
+    """
+    Gate only on the validated minimal S1 set; add light, non-blocking range checks.
+    """
+    missing = [k for k in S1_REQUIRED_MIN if k not in clinical]
+    warnings = []
+
+    # Range checks (gentle; do not block)
+    try:
+        if "hr.all" in clinical and not (40 <= float(clinical["hr.all"]) <= 250):
+            warnings.append("Heart rate seems out of range.")
+    except Exception:
+        pass
+    try:
+        if "rr.all" in clinical and not (10 <= float(clinical["rr.all"]) <= 120):
+            warnings.append("Breathing rate seems out of range.")
+    except Exception:
+        pass
+    try:
+        if "envhtemp" in clinical and not (30 <= float(clinical["envhtemp"]) <= 43):
+            warnings.append("Temperature seems out of range.")
+    except Exception:
+        pass
+    try:
+        if "age.months" in clinical and not (0 <= float(clinical["age.months"]) <= 180):
+            warnings.append("Age (months) seems out of range.")
+    except Exception:
+        pass
+
+    return missing, warnings
 
 # --------------------------------
 # Simple rule-based extractor (robust + free) for legacy path
@@ -387,17 +440,52 @@ def extract_features(text: str):
     return clinical, labs, notes
 
 def validate_complete(clinical: dict):
-    missing = [k for k in REQUIRED_S1 if k not in clinical]
+    """
+    Return (missing, warnings) where:
+      - missing: keys from the validated minimal S1 set that are absent
+      - warnings: gentle range checks (non-blocking)
+    """
+    # Gate ONLY on the validated minimal S1 set
+    missing = [k for k in S1_REQUIRED_MIN if k not in clinical or clinical[k] in (None, "")]
     warnings = []
-    # basic range checks (tune to your data)
-    if "oxy.ra" in clinical and not (50 <= int(clinical["oxy.ra"]) <= 100):
-        warnings.append("SpO2 seems out of range.")
-    if "hr.all" in clinical and not (40 <= int(clinical["hr.all"]) <= 250):
-        warnings.append("HR seems out of range.")
-    if "rr.all" in clinical and not (10 <= int(clinical["rr.all"]) <= 120):
-        warnings.append("RR seems out of range.")
-    if "age.months" in clinical and not (0 <= float(clinical["age.months"]) <= 180):
-        warnings.append("Age (months) seems out of range.")
+
+    # Gentle range checks (do not block)
+    try:
+        if "hr.all" in clinical and clinical["hr.all"] not in (None, ""):
+            if not (40 <= float(clinical["hr.all"]) <= 250):
+                warnings.append("Heart rate seems out of range.")
+    except Exception:
+        pass
+
+    try:
+        if "rr.all" in clinical and clinical["rr.all"] not in (None, ""):
+            if not (10 <= float(clinical["rr.all"]) <= 120):
+                warnings.append("Breathing rate seems out of range.")
+    except Exception:
+        pass
+
+    try:
+        if "envhtemp" in clinical and clinical["envhtemp"] not in (None, ""):
+            if not (30 <= float(clinical["envhtemp"]) <= 43):
+                warnings.append("Temperature seems out of range.")
+    except Exception:
+        pass
+
+    try:
+        if "age.months" in clinical and clinical["age.months"] not in (None, ""):
+            if not (0 <= float(clinical["age.months"]) <= 180):
+                warnings.append("Age (months) seems out of range.")
+    except Exception:
+        pass
+
+    # Optional: warn on SpO₂ if present (not required for S1 gating)
+    try:
+        if "oxy.ra" in clinical and clinical["oxy.ra"] not in (None, ""):
+            if not (70 <= float(clinical["oxy.ra"]) <= 100):
+                warnings.append("SpO₂ seems out of range.")
+    except Exception:
+        pass
+
     return missing, warnings
 
 # --------------------------------
