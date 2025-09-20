@@ -511,6 +511,14 @@ def _normalize_decision(val):
     val = (val or "").strip()
     return val
 
+def _norm_upper_decision(val: object) -> str:
+    """
+    Robust normalization to UPPERCASE without assuming `val` is a string.
+    Handles list/tuple -> first element.
+    """
+    d = _normalize_decision(val)  # already handles list/tuple
+    return d.replace(" ", "").upper()
+
 S1_DISCLAIMER = (
     "This is clinical decision support, not a diagnosis. You must use your own clinical judgment, "
     "training, and knowledge to make referral or treatment decisions. No liability is accepted."
@@ -548,28 +556,32 @@ def _s2_request_prompt() -> str:
         "Would you like to proceed to S2 with one of these options?"
     )
 
+def _first(x):
+    return (x[0] if isinstance(x, (list, tuple)) and x else x)
+
+def _as_float(x):
+    try:
+        return float(_first(x))
+    except Exception:
+        return None
+
 def _compute_meta_from_s1(s1_json: dict) -> dict:
     """
     Compute S1→S2 meta-probabilities from /s1_infer response:
       v1_pred_Severe = v1.prob; v1_pred_Other = 1 - v1.prob;
       v2_pred_NOTSevere = v2.prob; v2_pred_Other = 1 - v2.prob.
+    Accepts either scalars or 1-element lists from the API.
     """
-    try:
-        v1p = float(s1_json.get("v1", {}).get("prob"))
-    except Exception:
-        v1p = None
-    try:
-        v2p = float(s1_json.get("v2", {}).get("prob"))
-    except Exception:
-        v2p = None
+    v1p = _as_float(((s1_json or {}).get("v1") or {}).get("prob"))
+    v2p = _as_float(((s1_json or {}).get("v2") or {}).get("prob"))
 
     out = {}
     if v1p is not None:
         out["v1_pred_Severe"] = v1p
-        out["v1_pred_Other"] = 1.0 - v1p
+        out["v1_pred_Other"]  = 1.0 - v1p
     if v2p is not None:
         out["v2_pred_NOTSevere"] = v2p
-        out["v2_pred_Other"] = 1.0 - v2p
+        out["v2_pred_Other"]     = 1.0 - v2p
     return out
 
 
@@ -771,7 +783,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
             decision_text = format_s1_decision(s1.get("s1_decision"))
             reply = (message or "Running S1 now.") + "\n\n" + decision_text
 
-            d_norm = (s1.get("s1_decision") or "").strip().replace(" ", "").upper()
+            d_norm = _norm_upper_decision(s1.get("s1_decision"))
             if d_norm == "OTHER":
                 reply += "\n\n" + _s2_request_prompt()
             return state, reply
@@ -906,10 +918,10 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
             decision_text = format_s1_decision(s1.get("s1_decision"))
             reply = "Running S1 now.\n\n" + decision_text
 
-            d_norm = (s1.get("s1_decision") or "").strip().replace(" ", "").upper()
+            d_norm = _norm_upper_decision(s1.get("s1_decision"))
             if d_norm == "OTHER":
                 reply += "\n\n" + _s2_request_prompt()
-                
+
             return state, reply
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
