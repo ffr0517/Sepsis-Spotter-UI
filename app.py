@@ -44,9 +44,13 @@ You are Sepsis Spotter, a clinical intake and orchestration assistant (research 
 - Tool discipline: One tool call per turn. If you just used update_sheet and essentials are present, the next turn should be a normal assistant message asking for consent (do not chain an immediate call_api in the same turn).
 
 ## Model Selection
-- **S1**: default when clinical features are available (no labs required).
-- **S2**: requires labs (CRP, PCT, Lactate, WBC, Neutrophils, Platelets) — currently **NOT available**. If the user asks for or implies S2, briefly inform them S2 is unavailable, then proceed with S1.
-- If the user expresses **urgency**, run S1 with whatever is available (use placeholders per the S1 Payload Contract), then return the result.
+- **S1**: always run first once clinical essentials are present (see S1 Payload Contract).
+- **S2**: may run after S1 only if a **validated set** is present (plus S1→S2 meta-probs), otherwise warn once and require explicit confirmation to proceed unvalidated:
+  • **Validated Set A**: CRP (mg/L), TNFR1 (pg/ml), suPAR (ng/ml), SpO₂ on room air (oxy.ra, %).
+  • **Validated Set B**: CRP (mg/L), CXCl10 (pg/ml), IL-6 (pg/ml), SpO₂ on room air (oxy.ra, %).
+  • **Full lab panel**: proceed if many labs are present; note features_sent: full_lab_panel in the info sheet.
+  – If **no validated set** and user insists, warn: “Warning: this feature combination is NOT VALIDATED (see operational supplement). Results may be unreliable. Proceed only if you confirm.” If the user confirms, proceed and set validated_set=none (user-confirmed-unvalidated).
+- If the user expresses **urgency**, you may run S1 immediately with placeholders (per S1 Payload Contract), then offer S2 if validated inputs exist.
 
 ## Pre-flight Confirmation (STRICT)
 After any {"action":"update_sheet"}, if S1 essentials are present (age, sex, heart rate, breathing rate, oxygen level on room air), do not call the API yet. Instead:
@@ -267,12 +271,19 @@ API_S1 = os.getenv("SEPSIS_API_URL_S1", "https://sepsis-spotter-beta.onrender.co
 API_S2 = os.getenv("SEPSIS_API_URL_S2", "https://sepsis-spotter-beta.onrender.com/s2_infer")
 
 # Required fields for S1 (adjust to your exact schema)
-REQUIRED_S1 = ["age.months","sex","hr.all","rr.all","oxy.ra"]
+REQUIRED_S1 = [
+    "age.months", "sex", "bgcombyn", "adm.recent", "wfaz",
+    "cidysymp", "hr.all", "rr.all", "envhtemp", "crt.long"
+]
+
 OPTIONAL_S1 = [
     "wfaz","SIRS_num","crt.long","prior.care","danger.sign","not.alert",
     "urti","lrti","diarrhoeal","envhtemp","parenteral_screen"
 ]
-LAB_KEYS = ["CRP","PCT","Lactate","WBC","Neutrophils","Platelets"]  # add/remove as needed
+LAB_KEYS = [
+    "CRP", "TNFR1", "supar", "CXCl10", "IL6", "IL10", "IL1ra", "IL8", "PROC",
+    "ANG1", "ANG2", "CHI3L", "STREM1", "VEGFR1", "lblac", "lbglu", "enescbchb1"
+]
 
 # --------------------------------
 # Simple rule-based extractor (robust + free) for legacy path
@@ -377,6 +388,67 @@ def format_s1_decision(decision):
                 "that the model incorporating laboratory results and biomarkers is NOT currently available.")
     return f"{body}\n\n{S1_DISCLAIMER}"
 
+def _compute_meta_from_s1(s1_json: dict) -> dict:
+    """
+    Compute S1→S2 meta-probabilities from /s1_infer response:
+      v1_pred_Severe = v1.prob; v1_pred_Other = 1 - v1.prob;
+      v2_pred_NOTSevere = v2.prob; v2_pred_Other = 1 - v2.prob.
+    """
+    try:
+        v1p = float(s1_json.get("v1", {}).get("prob"))
+    except Exception:
+        v1p = None
+    try:
+        v2p = float(s1_json.get("v2", {}).get("prob"))
+    except Exception:
+        v2p = None
+
+    out = {}
+    if v1p is not None:
+        out["v1_pred_Severe"] = v1p
+        out["v1_pred_Other"] = 1.0 - v1p
+    if v2p is not None:
+        out["v2_pred_NOTSevere"] = v2p
+        out["v2_pred_Other"] = 1.0 - v2p
+    return out
+
+
+def _validated_set_name(features: dict) -> str | None:
+    """
+    Return 'A', 'B', 'full_lab_panel', or None based on available features.
+    Requires oxy.ra presence for A/B.
+    """
+    f = features or {}
+    def has(k): return (k in f) and (f[k] is not None)
+
+    # Validated Set A
+    if all(has(k) for k in ("CRP", "TNFR1", "supar", "oxy.ra")):
+        return "A"
+    # Validated Set B
+    if all(has(k) for k in ("CRP", "CXCl10", "IL6", "oxy.ra")):
+        return "B"
+    # Full lab panel heuristic: many labs (≥6) present (besides oxy.ra)
+    lab_count = len([k for k in f.keys() if k in LAB_KEYS])
+    if lab_count >= 6:
+        return "full_lab_panel"
+    return None
+
+
+def _extract_s2_call(s2_json):
+    """
+    /s2_infer returns a list with one row containing 'call' (4-class decision).
+    This extracts it safely.
+    """
+    try:
+        if isinstance(s2_json, list) and s2_json:
+            return str(s2_json[0].get("call") or "")
+    except Exception:
+        pass
+    try:
+        return str(s2_json.get("call") or "")
+    except Exception:
+        return ""
+
 # --------------------------------
 # Model calls
 # --------------------------------
@@ -390,13 +462,25 @@ def call_s1(clinical):
         raise RuntimeError(f"S1 endpoint unavailable or returned an error: {e}") from e
 
 
-def call_s2(features):
+def call_s2(features, apply_calibration=True, allow_heavy_impute=False):
     try:
-        r = requests.post(API_S2, json={"features": features}, timeout=30)
+        payload = {
+            "features": features,
+            "apply_calibration": bool(apply_calibration),
+        }
+        if allow_heavy_impute:
+            payload["allow_heavy_impute"] = True
+        r = requests.post(API_S2, json=payload, timeout=30)
         r.raise_for_status()
         return r.json()
     except requests.RequestException as e:
-        raise RuntimeError(f"S2 endpoint unavailable or returned an error: {e}") from e
+        # Try to surface useful reason text from server (e.g., 422 with 'reason')
+        try:
+            detail = r.json()
+        except Exception:
+            detail = {}
+        reason = detail.get("reason") or detail.get("error") or ""
+        raise RuntimeError(f"S2 error: {reason or e}") from e
 
 # --------------------------------
 # Agent helpers (LLM orchestrator)
@@ -487,12 +571,11 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     consent_patterns = r"\b(yes|yep|yeah|y|ok|okay|proceed|go ahead|run( the)? model|run s1|call s1|do it|please run)\b"
     user_ok = bool(re.search(consent_patterns, (user_text or "").lower()))
 
-    essentials_present = False
     try:
         missing_req, _warn = validate_complete((sheet.get("features") or {}).get("clinical", {}))
         essentials_present = (len(missing_req) == 0)
     except Exception:
-        pass
+        essentials_present = False
 
     def _run_s1_now():
         # helper to actually run S1 and clear consent gate
@@ -500,9 +583,10 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         if miss:
             return state, "Missing required fields for S1: " + ", ".join(miss) + "."
         try:
-            # (Optional but recommended) sanitize to exact S1 keys; see fix #4 below
             s1 = call_s1(sheet["features"]["clinical"])
             sheet["s1"] = s1
+            # Store meta-probs for S2
+            sheet.setdefault("features", {}).setdefault("clinical", {}).update(_compute_meta_from_s1(s1))
             state["sheet"] = sheet
             state["awaiting_consent"] = False
             reply = (message or "Running S1 now.") + "\n\n" + format_s1_decision(s1.get("s1_decision"))
@@ -510,16 +594,15 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         except Exception as e:
             return state, f"Error calling S1 API: {e}"
 
-    # Short-circuits to avoid loops
-    if user_ok and essentials_present:
+    # Short-circuit: if user explicitly consented and essentials exist, run S1 now
+    if user_ok and essentials_present and action != "call_api":
         return _run_s1_now()
 
     if state.get("awaiting_consent") and essentials_present and action in ("ask", "update_sheet") and not user_ok:
         return state, (message or "I have what I need.") + "\n\nShall I run S1 now?"
 
-
+    # ---- Actions ----
     if action == "ask":
-        # Just pass the model's concise question through
         state["sheet"] = sheet
         return state, (message or "Could you clarify one detail?")
 
@@ -544,16 +627,17 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         if warnings:
             nxt += "\n\n⚠️ " + " ".join(warnings)
 
-        # If we now have all essentials, explicitly ask for consent once
         if state["awaiting_consent"]:
             nxt = (message or "I have what I need.") + "\n\nShall I run S1 now?"
 
         return state, nxt
 
     if action == "call_api":
+        # Require explicit consent if we weren't already awaiting it
         user_ok = bool(re.search(r"\b(yes|run|proceed|go ahead|call s1|run s1)\b", (user_text or "").lower()))
         if not state.get("awaiting_consent") and not user_ok:
             return state, "I’m ready to run S1. Please confirm: shall I run it now?"
+
         stage = (cmd or {}).get("stage") or "auto"
         # Merge any features the tool call included
         feats = (cmd or {}).get("features") or {}
@@ -565,28 +649,42 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         if stage == "auto":
             stage = "S2" if sheet["features"]["labs"] else "S1"
 
-        # Validate for S1
         if stage == "S1":
-            missing, warnings = validate_complete(sheet["features"]["clinical"])
+            missing, _warnings = validate_complete(sheet["features"]["clinical"])
             if missing:
                 return state, "Missing required fields for S1: " + ", ".join(missing) + "."
-
-            try:
-                s1 = call_s1(sheet["features"]["clinical"])
-                sheet["s1"] = s1
-                state["sheet"] = sheet
-                reply = (message or "Running S1 now.") + "\n\n" + format_s1_decision(s1.get("s1_decision"))
-                return state, reply
-            except Exception as e:
-                return state, f"Error calling S1 API: {e}"
+            return _run_s1_now()
 
         elif stage == "S2":
+            # Ensure S1 has been run to obtain meta-probs first
+            if "s1" not in sheet:
+                miss, _ = validate_complete(sheet["features"]["clinical"])
+                if miss:
+                    return state, ("Before S2, we need to run S1 to obtain required meta-probabilities. "
+                                   "Missing: " + ", ".join(miss) + ".")
+                try:
+                    s1 = call_s1(sheet["features"]["clinical"])
+                    sheet["s1"] = s1
+                    sheet["features"]["clinical"].update(_compute_meta_from_s1(s1))
+                except Exception as e:
+                    return state, f"Error calling S1 (required before S2): {e}"
+
+            # Merge clinical + labs
+            merged = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
+
+            # Validated set policy
+            vname = _validated_set_name(merged)
+            if vname is None and not re.search(r"\b(yes|proceed|confirm|go ahead)\b", (user_text or "").lower()):
+                state["awaiting_consent"] = True
+                return state, ("Warning: this feature combination is NOT VALIDATED (see operational supplement). "
+                               "Results may be unreliable. Proceed only if you confirm.")
+
             try:
-                features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
-                s2 = call_s2(features)
+                s2 = call_s2(merged, apply_calibration=True)
                 sheet["s2"] = s2
                 state["sheet"] = sheet
-                reply = (message or "Running S2 now.") + f"\n\n**S2 decision:** {s2.get('s2_decision')}"
+                s2_call = _extract_s2_call(s2) or "Unavailable"
+                reply = (message or "Running S2 now.") + f"\n\n**S2 decision:** {s2_call}"
                 return state, reply
             except Exception as e:
                 return state, f"Error calling S2 API: {e}"
@@ -597,6 +695,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     # Fallback if the tool payload is malformed
     state["sheet"] = sheet
     return state, "I didn’t receive a valid action from the tool call."
+
 
 def run_pipeline_legacy(state, user_text, stage="auto"):
     clin_new, labs_new, _ = extract_features(user_text or "")
@@ -617,17 +716,19 @@ def run_pipeline_legacy(state, user_text, stage="auto"):
         if stage == "S1":
             s1 = call_s1(sheet["features"]["clinical"])
             sheet["s1"] = s1
+            sheet["features"]["clinical"].update(_compute_meta_from_s1(s1))
             state["sheet"] = sheet
             state["awaiting_consent"] = False
             reply = "Running S1 now.\n\n" + format_s1_decision(s1.get("s1_decision"))
             return state, reply
         elif stage == "S2":
             features = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
-            s2 = call_s2(features)
+            s2 = call_s2(features, apply_calibration=True)
             sheet["s2"] = s2
             state["sheet"] = sheet
             state["awaiting_consent"] = False
-            reply = "Running S2 now.\n\n**S2 decision:** " + str(s2.get("s2_decision"))
+            s2_call = _extract_s2_call(s2) or "Unavailable"
+            reply = "Running S2 now.\n\n**S2 decision:** " + s2_call
             return state, reply
         else:
             return state, "Unknown stage."
