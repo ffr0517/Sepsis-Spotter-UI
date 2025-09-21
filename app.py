@@ -81,6 +81,8 @@ You are Sepsis Spotter, a clinical intake and orchestration assistant (research 
 - Never invent values. If unsure, ask one focused question.
 - Convert years → months for age. Map sex: 1 = male, 0 = female.
 - Be concise; don’t paste the Info Sheet JSON back to the user (the UI shows it).
+- Avoid repetition: don’t repeat “Current info sheet updated” or the “press Run S1/Run S2” line in consecutive turns. If you already said it last turn, skip it.
+- If the user asks for a summary of the current sheet, provide a brief plain-language summary of what’s present and what’s missing for S1/S2.
 
 # Buttons & consent
 - When you believe the minimal S1 set is present, say:
@@ -246,6 +248,87 @@ def canonicalize_features(feats: dict) -> dict:
             labs_out[k] = v  # unknown key: keep as-is
 
     return {"clinical": clin_out, "labs": labs_out}
+
+S_DISCLAIMER = (
+    "This is clinical decision support, not a diagnosis. You must use your own clinical judgment, "
+    "training, and knowledge to make referral or treatment decisions. No liability is accepted."
+)
+
+def _first(x):
+    return x[0] if isinstance(x, (list, tuple)) and x else x
+
+def _norm_key(s):
+    return re.sub(r"\s+|\.", "", str(s or "")).upper()
+
+def format_s1_output(s1_json: dict) -> str:
+    decision = _first((s1_json or {}).get("s1_decision"))
+    key = _norm_key(decision)
+    if key == "SEVERE":
+        body = (
+            "Model decision: SEVERE. According to historical data and model specifics, the given patient’s symptoms "
+            "suggest a severe disease. That is, the child either died within two days of enrolment, required organ "
+            "support such as mechanical ventilation, inotropic therapy, or renal replacement within two days, or was "
+            "discharged home to die during this period."
+        )
+    elif key in ("NOTSEVERE", "NOTSEVERE"):
+        body = (
+            "Model decision: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms "
+            "suggest a non-severe disease. That is, the child was not admitted to any health facility and all symptoms "
+            "had resolved by day 28."
+        )
+    else:
+        body = (
+            "S1 decision: OTHER. According to model specifics, laboratory tests/biomarkers are required to make a more "
+            "informed outcome prediction."
+        )
+    return f"{body}\n\n{S_DISCLAIMER}"
+
+def _extract_s2_call(s2_json) -> str:
+    try:
+        if isinstance(s2_json, list) and s2_json:
+            return str(s2_json[0].get("call") or "")
+    except Exception:
+        pass
+    try:
+        return str(s2_json.get("call") or "")
+    except Exception:
+        return ""
+
+def format_s2_output(s2_json: dict) -> str:
+    decision = _extract_s2_call(s2_json)
+    key = _norm_key(decision)
+
+    if key == "SEVERE":
+        body = (
+            "Model decision: SEVERE. According to historical data and model specifics, the given patient’s symptoms "
+            "suggest a severe disease. That is, the child either died within two days of enrolment, required organ "
+            "support such as mechanical ventilation, inotropic therapy, or renal replacement within two days, or was "
+            "discharged home to die during this period."
+        )
+    elif key in ("NOTSEVERE", "NOTSEVERE"):
+        body = (
+            "Model decision: NOT SEVERE. According to historical data and model specifics, the given patient’s symptoms "
+            "suggest a non-severe disease. That is, the child was not admitted to any health facility and all symptoms "
+            "had resolved by day 28."
+        )
+    elif key in ("PROBSEVERE", "PROBABLESEVERE"):
+        body = (
+            "S2 decision: PROBABLE SEVERE\n"
+            "According to historical data and model specifics, the given patient’s symptoms suggest a probable severe disease. "
+            "That is, the child died after the first two days and before day 28 without meeting criteria for severe disease, "
+            "or required more than two days of hospital admission before day 28 without meeting criteria for severe disease."
+        )
+    elif key in ("PROBNONSEVERE", "PROBABLENONSEVERE"):
+        body = (
+            "S2 decision: PROBABLE NON-SEVERE\n"
+            "According to historical data and model specifics, the given patient’s symptoms suggest a probable non-severe disease. "
+            "That is, the child was admitted for two days or less before day 28 without criteria for severe or probable severe disease, "
+            "or was not admitted to hospital but still had ongoing symptoms at day 28."
+        )
+    else:
+        body = f"S2 decision: {decision or 'Unavailable'}."
+
+    return f"{body}\n\n{S_DISCLAIMER}"
 
 # ------------------------------
 # Info sheet helpers
@@ -462,13 +545,23 @@ def run_pipeline(state, user_text, use_llm=True):
         if clin or labs:
             sheet = merge_sheet(sheet, clin, labs)
             state["sheet"] = sheet
+        # keep this terse; the LLM isn't in play here
         return state, "Noted. If this looks right, press **Run S1** or **Run S2**."
 
     say, cmd = agent_call(user_text=user_text, sheet=sheet, conv_id=None)
+
+    updated = False
     if cmd and cmd.get("action") == "update_sheet":
         sheet = merge_features(sheet, cmd.get("features") or {})
         state["sheet"] = sheet
-    return state, (say or "Current info sheet updated. If this looks right, press **Run S1** if this is the first input, or **Run S2** if labs are present and you have already ran S1 for meta probabilities.")
+        updated = True
+
+    # Only fall back if the model returned nothing.
+    if say:
+        return state, say
+    if updated:
+        return state, "Info Sheet updated."
+    return state, "Okay."
 
 def run_s1_click(history, st):
     sheet = st.get("sheet") or new_sheet()
@@ -477,21 +570,15 @@ def run_s1_click(history, st):
         msg = "Missing required fields for S1: " + ", ".join(missing) + "."
         history = history + [{"role": "assistant", "content": msg}]
         return history, st, json.dumps(sheet, indent=2)
-    
 
-    # Call S1
     try:
         s1 = call_s1(sheet["features"]["clinical"])
         sheet["s1"] = s1
-        # Store meta-probs for possible S2 use
-        def _first(x):
-            return x[0] if isinstance(x, (list, tuple)) and x else x
+
+        # meta-probs (robust to list/scalar)
         def _as_float(x):
-            try:
-                return float(_first(x))
-            except Exception:
-                return None
-            
+            try: return float(_first(x))
+            except: return None
         v1p = _as_float(((s1 or {}).get("v1") or {}).get("prob"))
         v2p = _as_float(((s1 or {}).get("v2") or {}).get("prob"))
         if v1p is not None:
@@ -503,24 +590,18 @@ def run_s1_click(history, st):
 
         st["sheet"] = sheet
 
-        # Ask LLM to explain the outcome to the user
-        summary, _ = agent_call(
-            user_text="System: S1_RESULT_ATTACHED",
-            sheet=sheet, conv_id=None
-        )
-        history = history + [{"role": "assistant", "content": summary or "S1 result ready."}]
+        # Standardized message (no “next steps”)
+        summary = format_s1_output(s1)
+        history = history + [{"role": "assistant", "content": summary}]
         return history, st, json.dumps(sheet, indent=2)
 
     except requests.Timeout:
-        history = history + [{
-            "role": "assistant",
-            "content": f"S2 timed out after {int(float(READ_TIMEOUT_S2))}s. "
-            "The Info Sheet is unchanged. You can try again or increase "
-            "SEPSIS_API_READ_TIMEOUT_S2."
-        }]
+        history = history + [{"role": "assistant",
+                              "content": f"S1 timed out after {int(float(READ_TIMEOUT_S1))}s. "
+                                         "The Info Sheet is unchanged. Try again or increase SEPSIS_API_READ_TIMEOUT_S1."}]
         return history, st, json.dumps(sheet, indent=2)
     except Exception as e:
-        history = history + [{"role": "assistant", "content": f"Error calling S2: {e}"}]
+        history = history + [{"role": "assistant", "content": f"Error calling S1: {e}"}]
         return history, st, json.dumps(sheet, indent=2)
 
 def run_s2_click(history, st):
@@ -532,28 +613,29 @@ def run_s2_click(history, st):
     vname = validated_set_name(merged)
     if vname is None and not st.get("awaiting_unvalidated_s2"):
         st["awaiting_unvalidated_s2"] = True
-        # Let LLM ask for confirmation or more labs
-        ask, _ = agent_call(
-            user_text="System: S2_NOT_VALIDATED_REQUEST_CONFIRMATION",
-            sheet=sheet, conv_id=None
-        )
-        history = history + [{"role": "assistant", "content": ask or "This lab combination is not validated. Add labs or confirm to proceed."}]
+        # Short, deterministic warning (no LLM “next steps”)
+        warn = ("Warning: this biomarker combination is NOT VALIDATED. Results may be unreliable. "
+                "Press **Run S2** again to proceed anyway, or add a validated set "
+                "(A: CRP+TNFR1+suPAR+SpO₂ RA; B: CRP+CXCl10+IL6+SpO₂ RA).")
+        history = history + [{"role": "assistant", "content": warn}]
         return history, st, json.dumps(sheet, indent=2)
 
-    # Proceed (validated or previously confirmed)
     try:
         s2 = call_s2(merged, apply_calibration=True)
         sheet["s2"] = s2
         st["sheet"] = sheet
         st["awaiting_unvalidated_s2"] = False
 
-        summary, _ = agent_call(
-            user_text="System: S2_RESULT_ATTACHED",
-            sheet=sheet, conv_id=None
-        )
-        history = history + [{"role": "assistant", "content": summary or "S2 result ready."}]
+        # Standardized message only
+        summary = format_s2_output(s2)
+        history = history + [{"role": "assistant", "content": summary}]
         return history, st, json.dumps(sheet, indent=2)
 
+    except requests.Timeout:
+        history = history + [{"role": "assistant",
+                              "content": f"S2 timed out after {int(float(READ_TIMEOUT_S2))}s. "
+                                         "The Info Sheet is unchanged. Try again or increase SEPSIS_API_READ_TIMEOUT_S2."}]
+        return history, st, json.dumps(sheet, indent=2)
     except Exception as e:
         history = history + [{"role": "assistant", "content": f"Error calling S2: {e}"}]
         return history, st, json.dumps(sheet, indent=2)
