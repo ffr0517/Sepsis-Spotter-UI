@@ -55,8 +55,8 @@ You are Sepsis Spotter, a clinical intake and orchestration assistant for resour
 # Tool discipline
 - You have a single tool `sepsis_command` with actions: `ask`, `update_sheet`, or `call_api` (stage `S1` or `S2`).
 - When you emit a tool call, you MUST also include a short user-facing message in the same turn explaining what you just did or need next.
+- When the user provides enough labs for a validated S2 set and confirms SpO₂ is on room air, emit one tool call: {"action":"call_api","stage":"S2","features":{"labs":{…}}} (you may also include any newly parsed clinical in features.clinical). Do not send update_sheet first.
 - Call at most one tool per turn.
-
 # Data handling
 - Never invent values. Parse/confirm from the user's words. If unsure, ask a single focused question.
 - Convert years→months for age. Map sex: 1=male, 0=female.
@@ -373,9 +373,10 @@ def agent_call(user_text: str, sheet: dict, conv_id: str | None):
     return (say.strip() or None), (cmd or None)
 
 
-def agent_followup(sheet: dict, note: str = ""):
-    """Second pass after tools execute so the LLM—not the host—explains outcomes or next steps."""
-    user_text = f"SYSTEM_EVENT\n{note}" if note else "SYSTEM_EVENT"
+def agent_followup(sheet: dict, last_user: str = "", note: str = ""):
+    user_text = (last_user or "").strip()
+    if note:
+        user_text += f"\n\n[system_note]: {note}"
     say2, _ = agent_call(user_text=user_text, sheet=sheet, conv_id=None)
     return say2 or ""
 
