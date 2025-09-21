@@ -53,6 +53,7 @@ You are Sepsis Spotter, a clinical intake and orchestration assistant (research 
   • **Full lab panel**: proceed if many labs are present; note features_sent: full_lab_panel in the info sheet.
   – If **no validated set** and user insists, warn: “Warning: this feature combination is NOT VALIDATED (see operational supplement). Results may be unreliable. Proceed only if you confirm.” If the user confirms, proceed and set validated_set=none (user-confirmed-unvalidated).
 - If the user expresses **urgency**, you may run S1 immediately with placeholders (per S1 Payload Contract), then offer S2 if validated inputs exist.
+- After S1 returns “Other”, you should propose S2 and, if the labs match a validated set, directly emit {"action":"call_api","stage":"S2"} with a short message. If the set is not validated, warn once and then, if the user confirms, emit {"action":"call_api","stage":"S2"} again to proceed unvalidated.
 
 ## Pre-flight Confirmation (STRICT)
 After any {"action":"update_sheet"}, if the minimal S1 validated set is present, do not call the API yet. Instead present a short pre-flight summary and ask for consent.
@@ -299,6 +300,8 @@ S1_REQUIRED_LABELS = {
     "crt.long": "capillary refill time greater than 2 seconds? (1 = yes, 0 = no)",
 }
 
+AWAITING_UNVALIDATED_S2 = "awaiting_unvalidated_s2"
+
 def humanize_field(key: str) -> str:
     return S1_REQUIRED_LABELS.get(key, key.replace(".", " "))
 
@@ -510,13 +513,10 @@ def _normalize_decision(val):
     val = (val or "").strip()
     return val
 
-def _norm_upper_decision(val: object) -> str:
-    """
-    Robust normalization to UPPERCASE without assuming `val` is a string.
-    Handles list/tuple -> first element.
-    """
-    d = _normalize_decision(val)  # already handles list/tuple
-    return d.replace(" ", "").upper()
+def _norm_upper_decision(val):
+    if isinstance(val, (list, tuple)) and val:
+        val = val[0]
+    return (str(val or "")).replace(" ", "").upper()
 
 S1_DISCLAIMER = (
     "This is clinical decision support, not a diagnosis. You must use your own clinical judgment, "
@@ -541,18 +541,14 @@ def format_s1_decision(decision):
                 "tests/biomarkers are required to make a more informed outcome prediction.")
     return f"{body}\n\n{S1_DISCLAIMER}"
 
-def _s2_request_prompt() -> str:
-    """
-    What to ask the user when S1 returns 'Other'.
-    Requests a validated S2 set (or full panel) with exact units/field names.
-    """
+def _s2_request_prompt():
     return (
-        "Because Stage 1 returned “Other”, we can proceed to Stage 2 if labs are available. "
-        "Please provide either: "
-        "Validated Set B — CRP (mg/L), CXCl10 (pg/ml), IL-6 (pg/ml), and SpO₂ on room air (%); "
-        "or Validated Set A — CRP (mg/L), TNFR1 (pg/ml), suPAR (ng/ml), and SpO₂ on room air (%). "
-        "If you instead have many labs, you can share the full panel and we’ll use all available values. "
-        "Would you like to proceed to S2 with one of these options?"
+        "Because S1 returned “Other”, we can proceed to Stage 2 (S2) if labs are available.\n"
+        "Please provide one of the validated sets:\n"
+        "• Set A: CRP (mg/L), TNFR1 (pg/ml), suPAR (ng/ml), and SpO₂ on room air (%), or\n"
+        "• Set B: CRP (mg/L), CXCl10 (pg/ml), IL-6 (pg/ml), and SpO₂ on room air (%).\n"
+        "Alternatively, share a fuller lab panel and I’ll use all available values.\n"
+        "Would you like to proceed to S2?"
     )
 
 def _first(x):
@@ -758,43 +754,28 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     action = (cmd or {}).get("action")
     message = (cmd or {}).get("message") or ""
 
-    # --- Consent & essentials gate ---
-    consent_patterns = r"\b(yes|yep|yeah|y|ok|okay|proceed|go ahead|run( the)? model|run s1|call s1|do it|please run)\b"
-    user_ok = bool(re.search(consent_patterns, (user_text or "").lower()))
+    # User intent helpers
+    text_lower = (user_text or "").lower()
+    want_s2 = bool(re.search(r"\b(run|do|proceed( to)?)\s*(stage\s*2|s2)\b", text_lower))
+    user_confirms = bool(re.search(r"\b(confirm|go ahead|proceed|yes|ok|okay)\b", text_lower))
 
-    try:
-        missing_req, _warn = validate_complete((sheet.get("features") or {}).get("clinical", {}))
-        essentials_present = (len(missing_req) == 0)
-    except Exception:
-        essentials_present = False
-
-    def _run_s1_now():
-        # helper to actually run S1 and clear consent gate
-        miss, _warn = validate_complete(sheet["features"]["clinical"])
-        if miss:
-            return state, "Missing required fields for S1: " + ", ".join(miss) + "."
+    # -------- Fast-path: user confirmed unvalidated S2 last turn --------
+    if state.get(AWAITING_UNVALIDATED_S2) and (want_s2 or user_confirms or (action == "call_api" and ((cmd or {}).get("stage") == "S2"))):
+        merged = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
         try:
-            s1 = call_s1(sheet["features"]["clinical"])
-            sheet["s1"] = s1
-            # Store meta-probs for S2
-            sheet.setdefault("features", {}).setdefault("clinical", {}).update(_compute_meta_from_s1(s1))
+            s2 = call_s2(merged, apply_calibration=True)
+            sheet["s2"] = s2
             state["sheet"] = sheet
             state["awaiting_consent"] = False
-            decision_text = format_s1_decision(s1.get("s1_decision"))
-            reply = (message or "Running S1 now.") + "\n\n" + decision_text
-
-            d_norm = _norm_upper_decision(s1.get("s1_decision"))
-            if d_norm == "OTHER":
-                reply += "\n\n" + _s2_request_prompt()
-            return state, reply
+            state[AWAITING_UNVALIDATED_S2] = False
+            s2_call = _extract_s2_call(s2) or "Unavailable"
+            return state, "Running S2 now (user-confirmed unvalidated).\n\n**S2 decision:** " + s2_call
         except Exception as e:
-            return state, f"Error calling S1 API: {e}"
+            return state, f"Error calling S2 API: {e}"
 
-    # Short-circuit: if user explicitly consented and essentials exist, run S1 now
-    if user_ok and essentials_present and action != "call_api":
-        return _run_s1_now()
-
-    if state.get("awaiting_consent") and essentials_present and action in ("ask", "update_sheet") and not user_ok:
+    # --- Consent & essentials gate (soft) ---
+    # Only nudge for consent if we're waiting AND the tool isn't already calling an API.
+    if state.get("awaiting_consent") and action != "call_api":
         return state, (message or "I have what I need.") + "\n\nShall I run S1 now?"
 
     # ---- Actions ----
@@ -829,35 +810,54 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
         return state, nxt
 
     if action == "call_api":
-        # Require explicit consent if we weren't already awaiting it
-        user_ok = bool(re.search(r"\b(yes|run|proceed|go ahead|call s1|run s1)\b", (user_text or "").lower()))
-        if not state.get("awaiting_consent") and not user_ok:
-            return state, "I’m ready to run S1. Please confirm: shall I run it now?"
-
-        stage = (cmd or {}).get("stage") or "auto"
-        # Merge any features the tool call included
+        # Merge any features the tool call included (both for S1 and S2)
         feats = (cmd or {}).get("features") or {}
         sheet = merge_features(sheet, feats)
         state["sheet"] = sheet
-        state["awaiting_consent"] = False
 
-        # Choose stage
+        # Decide stage early so we can tailor consent logic
+        stage = (cmd or {}).get("stage") or "auto"
         if stage == "auto":
             stage = "S2" if sheet["features"]["labs"] else "S1"
 
+        # ---------- S1 path ----------
         if stage == "S1":
+            # Require a quick consent only for S1
+            user_ok = bool(re.search(r"\b(yes|run|proceed|go ahead|call s1|run s1|do it|please run)\b", text_lower))
+            if not state.get("awaiting_consent") and not user_ok:
+                return state, "I’m ready to run S1. Please confirm: shall I run it now?"
+
             missing, _warnings = validate_complete(sheet["features"]["clinical"])
             if missing:
                 return state, "Missing required fields for S1: " + ", ".join(missing) + "."
-            return _run_s1_now()
 
+            # Run S1
+            try:
+                s1 = call_s1(sheet["features"]["clinical"])
+                sheet["s1"] = s1
+                # Store meta-probs for S2
+                sheet.setdefault("features", {}).setdefault("clinical", {}).update(_compute_meta_from_s1(s1))
+                state["sheet"] = sheet
+                state["awaiting_consent"] = False
+
+                decision_text = format_s1_decision(s1.get("s1_decision"))
+                reply = (message or "Running S1 now.") + "\n\n" + decision_text
+
+                d_norm = _norm_upper_decision(s1.get("s1_decision"))
+                if d_norm == "OTHER":
+                    reply += "\n\n" + _s2_request_prompt()
+                return state, reply
+            except Exception as e:
+                return state, f"Error calling S1 API: {e}"
+
+        # ---------- S2 path ----------
         elif stage == "S2":
-            # Ensure S1 has been run to obtain meta-probs first
+            # Ensure S1 meta-probs exist; run S1 silently if needed
             if "s1" not in sheet:
                 miss, _ = validate_complete(sheet["features"]["clinical"])
                 if miss:
-                    return state, ("Before S2, we need to run S1 to obtain required meta-probabilities. "
-                                   "Missing: " + ", ".join(miss) + ".")
+                    return state, ("Before S2, I need to run S1 to compute required meta-probabilities. "
+                                   "Missing for S1: " + ", ".join(miss) + ".")
                 try:
                     s1 = call_s1(sheet["features"]["clinical"])
                     sheet["s1"] = s1
@@ -865,22 +865,34 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
                 except Exception as e:
                     return state, f"Error calling S1 (required before S2): {e}"
 
-            # Merge clinical + labs
+            # Merge clinical + labs for S2
             merged = {**sheet["features"]["clinical"], **sheet["features"]["labs"]}
 
-            # Validated set policy
+            # Detect validated set
             vname = _validated_set_name(merged)
-            if vname is None and not re.search(r"\b(yes|proceed|confirm|go ahead)\b", (user_text or "").lower()):
-                state["awaiting_consent"] = True
-                return state, ("Warning: this feature combination is NOT VALIDATED (see operational supplement). "
-                               "Results may be unreliable. Proceed only if you confirm.")
 
+            # If not validated and we’re not already in a confirm flow, warn once.
+            if vname is None and not state.get(AWAITING_UNVALIDATED_S2):
+                state[AWAITING_UNVALIDATED_S2] = True
+                return state, (
+                    "Warning: this biomarker combination is NOT VALIDATED. "
+                    "Results may be unreliable. Reply 'confirm' to proceed anyway, "
+                    "or share a validated set (A: CRP+TNFR1+suPAR+SpO₂; "
+                    "B: CRP+CXCl10+IL-6+SpO₂)."
+                )
+
+            # If validated OR user already confirmed unvalidated → run S2.
             try:
                 s2 = call_s2(merged, apply_calibration=True)
                 sheet["s2"] = s2
                 state["sheet"] = sheet
+                state["awaiting_consent"] = False
+                state[AWAITING_UNVALIDATED_S2] = False
                 s2_call = _extract_s2_call(s2) or "Unavailable"
-                reply = (message or "Running S2 now.") + f"\n\n**S2 decision:** {s2_call}"
+                reply = (
+                    message or
+                    ("Running S2 now." if vname else "Running S2 now (user-confirmed unvalidated).")
+                ) + f"\n\n**S2 decision:** {s2_call}"
                 return state, reply
             except Exception as e:
                 return state, f"Error calling S2 API: {e}"
@@ -891,6 +903,7 @@ def handle_tool_cmd(state, cmd, user_text, stage_hint="auto"):
     # Fallback if the tool payload is malformed
     state["sheet"] = sheet
     return state, "I didn’t receive a valid action from the tool call."
+
 
 
 def run_pipeline_legacy(state, user_text, stage="auto"):
