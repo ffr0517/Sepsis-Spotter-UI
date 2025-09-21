@@ -509,6 +509,7 @@ with gr.Blocks(fill_height=True) as ui:
                     btn_send = gr.Button("Send")     # was btn_run
                     btn_s1   = gr.Button("Run S1")
                     btn_s2   = gr.Button("Run S2")
+                    btn_new  = gr.Button("New Chat")
             with gr.Column(scale=2):
                 info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
@@ -555,6 +556,20 @@ with gr.Blocks(fill_height=True) as ui:
             else:
                 st["sheet"] = blob
             return st, "Merged.", json.dumps(st["sheet"], indent=2)
+        
+        def new_chat_and_bootstrap():
+            chat_reset, st, info_reset, paste_reset, tips_reset = reset_all()
+            history = chat_reset + [{"role": "user", "content": ""}]
+            st, reply = run_pipeline(st, "", use_llm=True)
+            history = history + [{"role": "assistant", "content": reply}]
+            info_json = json.dumps(st.get("sheet", {}), indent=2)
+            return history, st, info_json, paste_reset, tips_reset
+        
+        btn_new.click(
+            reset_all,
+            inputs=None,
+            outputs=[chat, state, info, paste, tips],
+            )
 
         btn_s1.click(run_s1_click, [chat, state], [chat, state, info])
         btn_s2.click(run_s2_click, [chat, state], [chat, state, info])
