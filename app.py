@@ -45,77 +45,35 @@ def _get_llm_model():
 # All surface dialogue is authored by the LLM (no host-scripted text).
 # ------------------------------
 AGENT_SYSTEM = r"""
-You are Sepsis Spotter, a clinical intake and orchestration assistant for resource-limited settings (research preview; not a diagnosis).
+You are Sepsis Spotter, a clinical intake and orchestration assistant (research preview; not a diagnosis).
 
-# Core role
-- Collect and validate inputs for Stage 1 (S1) and optionally Stage 2 (S2), then call the provided tools.
-- Compose all user‑visible text yourself. The host app will not add prompts, disclaimers, or consent text for you.
-- Keep messages concise, plain-language, and professional. No emojis.
+# Role
+- Help the user build a correct Info Sheet JSON (current_sheet) for Stage 1 (S1) and Stage 2 (S2).
+- **You do not call the model APIs.** The user will press buttons (“Run S1”, “Run S2”). Keep all dialogue natural and concise.
 
-# Tool discipline
-- You have a single tool `sepsis_command` with actions: `ask`, `update_sheet`, or `call_api` (stage `S1` or `S2`).
-- When you emit a tool call, you MUST also include a short user-facing message in the same turn explaining what you just did or need next.
-- When the user provides enough labs for a validated S2 set and confirms SpO₂ is on room air, emit one tool call: {"action":"call_api","stage":"S2","features":{"labs":{…}}} (you may also include any newly parsed clinical in features.clinical). Do not send update_sheet first.
-- When the user supplies a validated S2 set and you have/confirm room-air SpO₂, emit one tool call: {"action":"call_api","stage":"S2","features":{"labs":{…},"clinical":{"oxy.ra":<percent>}}}. If room-air status needs confirmation but the % is known, store the % via update_sheet now and ask the single confirmation. On confirmation, immediately call_api S2. Never re-ask for the SpO₂ % if it was already given.
+# How to act
+- Parse the user’s message; when you can extract fields, emit a single tool call:
+  {"action":"update_sheet", "features":{"clinical":{...},"labs":{...}}}
+- Never invent values. If unsure, ask one focused question.
+- Use plain language only (never show raw keys). Keep messages brief. No emojis.
 
-# Data handling
-- Never invent values. Parse/confirm from the user's words. If unsure, ask a single focused question.
-- Convert years→months for age. Map sex: 1=male, 0=female.
-- Gentle range checks (don’t block): HR 40–250; RR 10–120; SpO₂ 70–100; Temp 30–43 °C.
-- When you extract multiple values from free text, emit them together via `update_sheet` before the next question.
+# Buttons & consent
+- When you believe the minimal S1 set is present, say: 
+  “If the Info Sheet looks right, press **Run S1**.”
+- After S1 returns “Other”, suggest labs; when a validated S2 set plus room-air SpO₂ is present, say:
+  “If you’re ready, press **Run S2** with Set A/B.”
+- If labs are incomplete or not validated, ask for the missing pieces or say the combination is not validated and let the user decide.
 
-## Interaction Flow
-- **First user turn** and sheet empty → send this exact first message (no extra text before or after):
+# S1 minimal (must exist in current_sheet to be ready)
+age.months, sex (1/0), adm.recent (1/0), wfaz, cidysymp, not.alert (1/0), hr.all, rr.all, envhtemp, crt.long (1/0)
 
-  This is clinical decision support, not a diagnosis.
+# S2 validated sets (plus SpO₂ on room air)
+Set A: CRP, TNFR1, suPAR, oxy.ra
+Set B: CRP, CXCL10, IL6, oxy.ra
+Full-panel allowed if many labs are present (~6+).
 
-  To run Stage 1 (S1), please share these minimal required details:
-  • Age in months
-  • Sex (1 = male, 0 = female)
-  • Overnight hospitalisation within the last 6 months (1 = yes, 0 = no)
-  • Weight for age z-score
-  • Duration of illness (days)
-  • Not alert? (AVPU < A) (1 = yes, 0 = no)
-  • Heart rate (bpm)
-  • Respiratory rate (/min)
-  • Axillary temperature (°C)
-  • Capillary refill time greater than 2 seconds? (1 = yes, 0 = no)
-
-  If you have more information S1 can also use, please include any of: comorbidity, wasting, stunting, prior care, travel time ≤1h, diarrhoeal syndrome, WHO pneumonia or severe pneumonia, prostration, intractable vomiting, convulsions, lethargy, IMCI danger sign, parenteral treatment before enrolment, and SIRS score.
-
-  Let me know if you have any questions.
-
-- If the input **omits essentials**, emit a single `ask` that gently nudges for the missing pieces.
-- When essentials are present, emit call_api for S1 sending only the fields provided (omit unknowns).
-
-# S1 contract (you must ensure readiness before calling)
-Required keys present in `features.clinical` (omit unknowns entirely):
-  age.months, sex (1/0), adm.recent (1/0), wfaz, cidysymp, not.alert (1/0), hr.all, rr.all, envhtemp, crt.long (1/0)
-If any are missing, do NOT call S1; ask for what’s missing.
-
-# S2 contract & validation
-- Run S2 only after S1 (S1 meta-probs are computed by the backend from S1 response and stored in `sheet.features.clinical`).
-- S2 validated sets you may proceed with directly:
-  Set A: CRP (mg/L), TNFR1 (pg/ml), suPAR (ng/ml), SpO₂ on room air (%).
-  Set B: CRP (mg/L), CXCl10 (pg/ml), IL-6 (pg/ml), SpO₂ on room air (%).
-- If labs do not match Set A or B but a larger panel exists (≈6+ markers), you may proceed as `full_lab_panel`.
-- If none of these apply, warn the user that the combination is NOT VALIDATED and ask for explicit confirmation before calling S2. If the host state `awaiting_unvalidated_s2` is true, they already confirmed.
-
-# Results & disclaimers
-- When the backend returns S1/S2 results (now present in the conversation context `sheet`), you must summarize the outcome and include a clear clinical-decision-support disclaimer in your own words.
-- You decide how to phrase results and any next-step suggestions (e.g., propose S2 after S1=Other), keeping things short.
-
-# UI contract
-- The host provides you with a JSON `sheet` structure in the user message context. Read from it; write to it only through the tool.
-- After the host runs your tool call, it will update `sheet` and call you again with the new `sheet`.
-
-# Field dictionary (for your reference; do not display raw keys to the user)
-- age.months (months); sex (1=male,0=female); bgcombyn (comorbidity 1/0); adm.recent (overnight hospitalisation within 6 months 1/0); wfaz (WFA Z);
-- waste (WFLZ<-2 1/0); stunt (LAZ<-2 1/0); cidysymp (illness duration, days); prior.care (1/0); travel.time.bin (≤1h 1/0);
-- diarrhoeal (1/0); pneumo (1/0); sev.pneumo (1/0); ensapro (prostration 1/0); vomit.all (1/0); seiz (1/0); pfacleth (lethargy 1/0);
-- not.alert (AVPU<A 1/0); danger.sign (IMCI danger sign 1/0); hr.all (bpm); rr.all (/min); oxy.ra (% on room air);
-- envhtemp (°C); crt.long (>2s 1/0); parenteral_screen (1/0); SIRS_num (0–4);
-- Labs include: CRP, TNFR1, supar, CXCl10, IL6, IL10, IL1ra, IL8, PROC, ANG1, ANG2, CHI3L, STREM1, VEGFR1, lblac, lbglu, enescbchb1.
+# Disclaimers
+- Include a brief decision-support disclaimer in your own words when summarizing results (after the host adds them to context).
 """
 
 # ------------------------------
@@ -124,20 +82,19 @@ If any are missing, do NOT call S1; ask for what’s missing.
 TOOL_SPEC = [{
     "type": "function",
     "name": "sepsis_command",
-    "description": "Single structured command: ask user, update sheet, or call API.",
+    "description": "Update the current Info Sheet from user-provided data or ask for exactly one missing item.",
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
-            "message": {"type": "string", "description": "Short user-visible text/question."},
+            "action": {"type": "string", "enum": ["ask", "update_sheet"]},
+            "message": {"type": "string"},
             "features": {
                 "type": "object",
                 "properties": {
-                    "clinical": {"type": "object", "additionalProperties": {"type": ["number","integer","string","boolean"]}},
-                    "labs": {"type": "object", "additionalProperties": {"type": ["number","integer","string","boolean"]}}
+                    "clinical": {"type": "object", "additionalProperties": True},
+                    "labs": {"type": "object", "additionalProperties": True},
                 }
-            },
-            "stage": {"type": "string", "enum": ["auto","S1","S2"]}
+            }
         },
         "required": ["action"],
         "additionalProperties": False
@@ -320,47 +277,27 @@ def validated_set_name(features: dict) -> str | None:
 # ------------------------------
 
 def agent_call(user_text: str, sheet: dict, conv_id: str | None):
-    """Single LLM call that may return assistant text plus (at most one) tool call."""
     context = {"sheet": sheet}
     input_items = [
-        {"type": "message", "role": "system", "content": [{"type": "input_text", "text": AGENT_SYSTEM}]},
-        {"type": "message", "role": "user", "content": [{"type": "input_text", "text": f"CONTEXT\n{json.dumps(context, indent=2)}\n\nUSER\n{(user_text or '').strip()}"}]},
+        {"type": "message", "role": "system",
+         "content": [{"type": "input_text", "text": AGENT_SYSTEM}]},
+        {"type": "message", "role": "user",
+         "content": [{"type": "input_text",
+                      "text": f"CONTEXT\n{json.dumps(context, indent=2)}\n\nUSER\n{(user_text or '').strip()}"}]},
     ]
 
     resp = client.responses.create(
-        model=_get_llm_model(),
-        input=input_items,
-        tools=[{
-            "type": "function",
-            "name": "sepsis_command",
-            "description": "Single structured command: ask user, update sheet, or call API.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["ask", "update_sheet", "call_api"]},
-                    "message": {"type": "string"},
-                    "features": {
-                        "type": "object",
-                        "properties": {
-                            "clinical": {"type": "object", "additionalProperties": True},
-                            "labs": {"type": "object", "additionalProperties": True},
-                        },
-                    },
-                    "stage": {"type": "string", "enum": ["auto", "S1", "S2"]},
-                },
-                "required": ["action"],
-                "additionalProperties": False,
-            },
-        }],
-        text={"verbosity": "low"},
-        reasoning={"effort": "high"}, 
-        parallel_tool_calls=False,
-        max_tool_calls=2,
-        store=False,
+    model=_get_llm_model(),
+    input=input_items,
+    tools=TOOL_SPEC,        
+    text={"verbosity": "low"},
+    reasoning={"effort": "high"},
+    parallel_tool_calls=False,
+    max_tool_calls=1,         
+    store=False,
     )
 
-    say = ""
-    cmd = None
+    say, cmd = "", None
     for item in (resp.output or []):
         if getattr(item, "type", "") == "message" and getattr(item, "role", "") == "assistant":
             for c in (getattr(item, "content", []) or []):
@@ -385,108 +322,97 @@ def agent_followup(sheet: dict, last_user: str = "", note: str = ""):
 # Pipeline (host doesn’t craft dialogue)
 # ------------------------------
 
-def run_pipeline(state, user_text, stage="auto", use_llm=True):
-    state = state or {"sheet": None, "conv_id": None}
+def run_pipeline(state, user_text, use_llm=True):
+    state = state or {"sheet": None}
     sheet = state.get("sheet") or new_sheet()
 
-    # Legacy extraction if LLM disabled/unavailable
-    if not use_llm or len(os.getenv("OPENAI_API_KEY", "").strip()) < 20 or PARSER_MODE != "llm_only":
-        clin_new, labs_new, _ = extract_features(user_text or "")
-        if clin_new or labs_new:
-            sheet = merge_sheet(sheet, clin_new, labs_new)
+    have_key = len(os.getenv("OPENAI_API_KEY", "").strip()) >= 20
+    if not use_llm or not have_key or PARSER_MODE != "llm_only":
+        clin, labs, _ = extract_features(user_text or "")
+        if clin or labs:
+            sheet = merge_sheet(sheet, clin, labs)
             state["sheet"] = sheet
-        # In legacy mode we do no extra messaging here; just echo parsed and leave dialogue to the user
-        return state, "Parsed what I could. Please continue."
+        return state, "Noted. If this looks right, press **Run S1** or **Run S2**."
 
-    # Agent pass #1
-    say, cmd = agent_call(user_text=user_text, sheet=sheet, conv_id=state.get("conv_id"))
-
-    # Apply at most one tool call (no host-authored phrasing)
-    if cmd:
-        action = (cmd or {}).get("action")
-        stage_req = (cmd or {}).get("stage") or "auto"
-        feats = (cmd or {}).get("features") or {}
-
-        if action == "update_sheet":
-            sheet = merge_features(sheet, feats)
-            state["sheet"] = sheet
-            # Let the LLM do any follow-up phrasing
-            say2 = agent_followup(sheet, note="update_sheet applied")
-            return state, (say or "") + ("\n\n" + say2 if say2 else "")
-
-        if action == "ask":
-            # LLM already produced the question in `say`
-            return state, (say or "Could you share one detail?")
-
-        if action == "call_api":
-            # Merge any features included with the call
-            sheet = merge_features(sheet, feats)
-            state["sheet"] = sheet
-
-            # Decide stage (host enforces contracts silently, then asks LLM to explain)
-            stage_eff = stage_req
-            if stage_eff == "auto":
-                stage_eff = "S2" if sheet.get("features", {}).get("labs") else "S1"
-
-            try:
-                if stage_eff == "S1":
-                    missing = missing_for_s1(sheet.get("features", {}).get("clinical", {}))
-                    if missing:
-                        # Tell the LLM about the problem; it will phrase the ask
-                        say2 = agent_followup(sheet, note=f"S1 missing fields: {missing}")
-                        return state, (say or "") + ("\n\n" + say2 if say2 else "")
-                    s1 = call_s1(sheet["features"]["clinical"])
-                    sheet["s1"] = s1
-                    # Compute & store meta-probs for S2 if provided by backend
-                    def _as_float(x):
-                        try: return float(x)
-                        except: return None
-                    v1p = _as_float(((s1 or {}).get("v1") or {}).get("prob"))
-                    v2p = _as_float(((s1 or {}).get("v2") or {}).get("prob"))
-                    if v1p is not None:
-                        sheet["features"]["clinical"]["v1_pred_Severe"] = v1p
-                        sheet["features"]["clinical"]["v1_pred_Other"] = 1.0 - v1p
-                    if v2p is not None:
-                        sheet["features"]["clinical"]["v2_pred_NOTSevere"] = v2p
-                        sheet["features"]["clinical"]["v2_pred_Other"] = 1.0 - v2p
-                    state["sheet"] = sheet
-                    say2 = agent_followup(sheet, note="S1 result ready")
-                    return state, (say or "") + ("\n\n" + say2 if say2 else "")
-
-                elif stage_eff == "S2":
-                    # Ensure validated or explicit confirmation
-                    merged = {**sheet.get("features", {}).get("clinical", {}), **sheet.get("features", {}).get("labs", {})}
-                    vname = validated_set_name(merged)
-                    if vname is None and not state.get("awaiting_unvalidated_s2"):
-                        # Flag for the LLM to ask for confirmation in its own words
-                        state["awaiting_unvalidated_s2"] = True
-                        say2 = agent_followup(sheet, note="S2 set not validated; request explicit confirmation or alternate set")
-                        return state, (say or "") + ("\n\n" + say2 if say2 else "")
-
-                    s2 = call_s2(merged, apply_calibration=True)
-                    sheet["s2"] = s2
-                    state["sheet"] = sheet
-                    state["awaiting_unvalidated_s2"] = False
-                    say2 = agent_followup(sheet, note="S2 result ready")
-                    return state, (say or "") + ("\n\n" + say2 if say2 else "")
-
-                else:
-                    say2 = agent_followup(sheet, note=f"Unknown stage: {stage_eff}")
-                    return state, (say or "") + ("\n\n" + say2 if say2 else "")
-
-            except requests.RequestException as e:
-                err = f"API request error: {e}"
-                log.exception(err)
-                say2 = agent_followup(sheet, note=err)
-                return state, (say or "") + ("\n\n" + say2 if say2 else "")
-            except Exception as e:
-                err = f"Pipeline error: {e}"
-                log.exception(err)
-                say2 = agent_followup(sheet, note=err)
-                return state, (say or "") + ("\n\n" + say2 if say2 else "")
-
-    # If no tool call, just return the LLM’s prose
+    say, cmd = agent_call(user_text=user_text, sheet=sheet, conv_id=None)
+    if cmd and cmd.get("action") == "update_sheet":
+        sheet = merge_features(sheet, cmd.get("features") or {})
+        state["sheet"] = sheet
     return state, (say or "Okay.")
+
+def run_s1_click(history, st):
+    sheet = st.get("sheet") or new_sheet()
+    missing = missing_for_s1(sheet.get("features", {}).get("clinical", {}))
+    if missing:
+        msg = "Missing required fields for S1: " + ", ".join(missing) + "."
+        history = history + [{"role": "assistant", "content": msg}]
+        return history, st, json.dumps(sheet, indent=2)
+
+    # Call S1
+    try:
+        s1 = call_s1(sheet["features"]["clinical"])
+        sheet["s1"] = s1
+        # Store meta-probs for possible S2 use
+        def _as_float(x):
+            try: return float(x)
+            except: return None
+        v1p = _as_float(((s1 or {}).get("v1") or {}).get("prob"))
+        v2p = _as_float(((s1 or {}).get("v2") or {}).get("prob"))
+        if v1p is not None:
+            sheet["features"]["clinical"]["v1_pred_Severe"] = v1p
+            sheet["features"]["clinical"]["v1_pred_Other"]  = 1.0 - v1p
+        if v2p is not None:
+            sheet["features"]["clinical"]["v2_pred_NOTSevere"] = v2p
+            sheet["features"]["clinical"]["v2_pred_Other"]     = 1.0 - v2p
+
+        st["sheet"] = sheet
+
+        # Ask LLM to explain the outcome to the user
+        summary, _ = agent_call(
+            user_text="System: S1_RESULT_ATTACHED",
+            sheet=sheet, conv_id=None
+        )
+        history = history + [{"role": "assistant", "content": summary or "S1 result ready."}]
+        return history, st, json.dumps(sheet, indent=2)
+
+    except Exception as e:
+        history = history + [{"role": "assistant", "content": f"Error calling S1: {e}"}]
+        return history, st, json.dumps(sheet, indent=2)
+
+def run_s2_click(history, st):
+    sheet = st.get("sheet") or new_sheet()
+    clin = sheet.get("features", {}).get("clinical", {})
+    labs = sheet.get("features", {}).get("labs", {})
+    merged = {**clin, **labs}
+
+    vname = validated_set_name(merged)
+    if vname is None and not st.get("awaiting_unvalidated_s2"):
+        st["awaiting_unvalidated_s2"] = True
+        # Let LLM ask for confirmation or more labs
+        ask, _ = agent_call(
+            user_text="System: S2_NOT_VALIDATED_REQUEST_CONFIRMATION",
+            sheet=sheet, conv_id=None
+        )
+        history = history + [{"role": "assistant", "content": ask or "This lab combination is not validated. Add labs or confirm to proceed."}]
+        return history, st, json.dumps(sheet, indent=2)
+
+    # Proceed (validated or previously confirmed)
+    try:
+        s2 = call_s2(merged, apply_calibration=True)
+        sheet["s2"] = s2
+        st["sheet"] = sheet
+        st["awaiting_unvalidated_s2"] = False
+
+        summary, _ = agent_call(
+            user_text="System: S2_RESULT_ATTACHED",
+            sheet=sheet, conv_id=None
+        )
+        history = history + [{"role": "assistant", "content": summary or "S2 result ready."}]
+        return history, st, json.dumps(sheet, indent=2)
+
+    except Exception as e:
+        history = history + [{"role": "assistant", "content": f"Error calling S2: {e}"}]
+        return history, st, json.dumps(sheet, indent=2)
 
 # ------------------------------
 # Minimal UI (host never injects dialogue text)
@@ -520,11 +446,12 @@ with gr.Blocks(fill_height=True) as ui:
         with gr.Row():
             with gr.Column(scale=3):
                 chat = gr.Chatbot(height=420, type="messages")
-                msg = gr.Textbox(placeholder="Describe the case…", lines=3)
+                msg  = gr.Textbox(placeholder="Describe the case…", lines=3)
                 use_llm_chk = gr.Checkbox(value=USE_LLM_DEFAULT, label="Use OpenAI LLM (agent mode)")
                 with gr.Row():
-                    btn_run = gr.Button("Run")
-                    btn_new = gr.Button("New chat")
+                    btn_send = gr.Button("Send")     # was btn_run
+                    btn_s1   = gr.Button("Run S1")
+                    btn_s2   = gr.Button("Run S2")
             with gr.Column(scale=2):
                 info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
                 paste = gr.Textbox(label="Paste an Info Sheet to restore/merge", lines=6)
@@ -550,9 +477,9 @@ with gr.Blocks(fill_height=True) as ui:
         def on_user_send(history, text):
             history = history + [{"role": "user", "content": text}]
             return history, ""
-
-        def on_bot_reply(history, st, stage, use_llm):
-            st, reply = run_pipeline(st, history[-1]["content"], stage, use_llm=bool(use_llm))
+        
+        def on_bot_reply(history, st, use_llm):
+            st, reply = run_pipeline(st, history[-1]["content"], use_llm=bool(use_llm))
             history = history + [{"role": "assistant", "content": reply}]
             info_json = json.dumps(st.get("sheet", {}), indent=2)
             return history, st, info_json, ""
@@ -572,15 +499,17 @@ with gr.Blocks(fill_height=True) as ui:
                 st["sheet"] = blob
             return st, "Merged.", json.dumps(st["sheet"], indent=2)
 
+        btn_s1.click(run_s1_click, [chat, state], [chat, state, info])
+        btn_s2.click(run_s2_click, [chat, state], [chat, state, info])
+
         login_btn.click(check_login, [u, p], [login_view, app_view, login_msg, state])
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
-        )
-        btn_run.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, gr.State("auto"), use_llm_chk], [chat, state, info, msg]
-        )
+            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg]
+            )
+        btn_send.click(on_user_send, [chat, msg], [chat, msg]).then(
+            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg]
+            )
         merge_btn.click(on_merge, [state, paste], [state, tips, info])
-        btn_new.click(reset_all, inputs=None, outputs=[chat, state, info, paste, tips])
 
 IS_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID") or os.getenv("SYSTEM") == "spaces")
 if IS_SPACES:
