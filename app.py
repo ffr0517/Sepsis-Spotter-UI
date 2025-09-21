@@ -197,6 +197,56 @@ LAB_KEYS = [
     "ANG1", "ANG2", "CHI3L", "STREM1", "VEGFR1", "lblac", "lbglu", "enescbchb1"
 ]
 
+LAB_CANON = {
+    "crp": "CRP",
+    "tnfr1": "TNFR1",
+    "supar": "supar",
+    "cxcl10": "CXCl10",   # ← canonical uses lowercase 'l'
+    "il6": "IL6",
+    "il10": "IL10",
+    "il1ra": "IL1ra",
+    "il8": "IL8",
+    "proc": "PROC",
+    "ang1": "ANG1",
+    "ang2": "ANG2",
+    "chi3l": "CHI3L",
+    "strem1": "STREM1",
+    "vegfr1": "VEGFR1",
+    "lblac": "lblac",
+    "lbglu": "lbglu",
+    "enescbchb1": "enescbchb1",
+    # SpO2 synonyms (if the LLM ever writes a "lab" key for it)
+    "spo2": "oxy.ra",
+    "spo₂": "oxy.ra",
+    "oxygen": "oxy.ra",
+    "sat": "oxy.ra",
+}
+
+def _normkey(k: str) -> str:
+    # lowercase + strip non-alphanum so "CXCL-10" and "cxcl10" collapse
+    return re.sub(r"[^a-z0-9]+", "", (k or "").lower())
+
+def canonicalize_features(feats: dict) -> dict:
+    feats = feats or {}
+    clin_in = (feats.get("clinical") or {}).copy()
+    labs_in = (feats.get("labs") or {}).copy()
+
+    clin_out = dict(clin_in)
+    labs_out = {}
+
+    for k, v in labs_in.items():
+        nk = _normkey(k)
+        canon = LAB_CANON.get(nk)
+        if canon == "oxy.ra":
+            # make sure SpO2 lands in clinical
+            clin_out["oxy.ra"] = v
+        elif canon:
+            labs_out[canon] = v
+        else:
+            labs_out[k] = v  # unknown key: keep as-is
+
+    return {"clinical": clin_out, "labs": labs_out}
+
 # ------------------------------
 # Info sheet helpers
 # ------------------------------
@@ -219,10 +269,11 @@ def merge_sheet(sheet, add_clin, add_labs):
 
 
 def merge_features(sheet, feats):
+    feats = canonicalize_features(feats)  # ← normalize first
     return merge_sheet(
         sheet,
-        (feats or {}).get("clinical", {}) or {},
-        (feats or {}).get("labs", {}) or {},
+        feats.get("clinical") or {},
+        feats.get("labs") or {},
     )
 
 # ------------------------------
@@ -329,25 +380,23 @@ def missing_for_s1(clinical: dict):
 
 
 def validated_set_name(features: dict) -> str | None:
-    f = features or {}
+    # work on a normalized copy so key casing/aliases don't matter
+    feats = canonicalize_features({"labs": {k: v for k, v in (features or {}).items() if k not in ("age.months","sex")}, 
+                                   "clinical": {"oxy.ra": features.get("oxy.ra")}})
+    f = {**(feats.get("clinical") or {}), **(feats.get("labs") or {})}
 
     def provided(k):
-        if k not in f:
-            return False
+        if k not in f: return False
         v = f[k]
-        if v is None:
-            return False
-        if isinstance(v, str) and v.strip() == "":
-            return False
-        if v == 0 or v == 0.0:
-            return False
+        if v is None: return False
+        if isinstance(v, str) and v.strip() == "": return False
+        if v == 0 or v == 0.0: return False
         return True
 
     if provided("CRP") and provided("TNFR1") and provided("supar") and provided("oxy.ra"):
         return "A"
     if provided("CRP") and provided("CXCl10") and provided("IL6") and provided("oxy.ra"):
         return "B"
-
     lab_count = sum(1 for k in LAB_KEYS if provided(k))
     if lab_count >= 6:
         return "full_lab_panel"
@@ -435,9 +484,14 @@ def run_s1_click(history, st):
         s1 = call_s1(sheet["features"]["clinical"])
         sheet["s1"] = s1
         # Store meta-probs for possible S2 use
+        def _first(x):
+            return x[0] if isinstance(x, (list, tuple)) and x else x
         def _as_float(x):
-            try: return float(x)
-            except: return None
+            try:
+                return float(_first(x))
+            except Exception:
+                return None
+            
         v1p = _as_float(((s1 or {}).get("v1") or {}).get("prob"))
         v2p = _as_float(((s1 or {}).get("v2") or {}).get("prob"))
         if v1p is not None:
