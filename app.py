@@ -3,6 +3,29 @@ import requests
 import gradio as gr
 import logging, sys
 from openai import OpenAI
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+CONNECT_TIMEOUT = float(os.getenv("SEPSIS_API_CONNECT_TIMEOUT", "30"))
+READ_TIMEOUT_DEFAULT = float(os.getenv("SEPSIS_API_READ_TIMEOUT", "120"))
+READ_TIMEOUT_S1 = float(os.getenv("SEPSIS_API_READ_TIMEOUT_S1", str(READ_TIMEOUT_DEFAULT)))
+READ_TIMEOUT_S2 = float(os.getenv("SEPSIS_API_READ_TIMEOUT_S2", "180"))  # S2 is heavier; default 180s
+
+def _retry_session():
+    s = requests.Session()
+    retry = Retry(
+        total=2,                # 2 quick retries on transient errors
+        backoff_factor=0.5,     # 0.5s, 1.0s
+        status_forcelist=[502, 503, 504],
+        allowed_methods=["POST"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
+
+SESSION = _retry_session()
 
 # ------------------------------
 # Logging
@@ -62,8 +85,8 @@ You are Sepsis Spotter, a clinical intake and orchestration assistant (research 
 # Buttons & consent
 - When you believe the minimal S1 set is present, say:
   If the Info Sheet looks right, press **Run S1**.
-- After S1 returns “Other”, suggest labs; when a validated S2 set plus room-air SpO₂ is present, say:
-  If you’re ready, press **Run S2** with Set A/B.
+- After S1 returns “Other”, suggest that the user provide additional information, in the form of a validated set of labs for S2; when a validated S2 set plus room-air SpO₂ is present, say:
+  If you’re ready, press **Run S2**.
 - If labs are incomplete or not validated, ask for the missing pieces or state that the combination is not validated and let the user decide.
 
 # S1 minimal (must exist in current_sheet to be ready)
@@ -283,16 +306,17 @@ def build_s1_payload(clinical_in: dict) -> dict:
 
 def call_s1(clinical):
     payload = build_s1_payload(clinical)
-    r = requests.post(API_S1, json={"features": payload}, timeout=30)
+    r = SESSION.post(API_S1, json={"features": payload},
+                     timeout=(CONNECT_TIMEOUT, READ_TIMEOUT_S1))
     r.raise_for_status()
     return r.json()
-
 
 def call_s2(features, apply_calibration=True, allow_heavy_impute=False):
     payload = {"features": features, "apply_calibration": bool(apply_calibration)}
     if allow_heavy_impute:
         payload["allow_heavy_impute"] = True
-    r = requests.post(API_S2, json=payload, timeout=30)
+    r = SESSION.post(API_S2, json=payload,
+                     timeout=(CONNECT_TIMEOUT, READ_TIMEOUT_S2))
     r.raise_for_status()
     return r.json()
 
@@ -404,6 +428,7 @@ def run_s1_click(history, st):
         msg = "Missing required fields for S1: " + ", ".join(missing) + "."
         history = history + [{"role": "assistant", "content": msg}]
         return history, st, json.dumps(sheet, indent=2)
+    
 
     # Call S1
     try:
@@ -432,8 +457,16 @@ def run_s1_click(history, st):
         history = history + [{"role": "assistant", "content": summary or "S1 result ready."}]
         return history, st, json.dumps(sheet, indent=2)
 
+    except requests.Timeout:
+        history = history + [{
+            "role": "assistant",
+            "content": f"S2 timed out after {int(float(READ_TIMEOUT_S2))}s. "
+            "The Info Sheet is unchanged. You can try again or increase "
+            "SEPSIS_API_READ_TIMEOUT_S2."
+        }]
+        return history, st, json.dumps(sheet, indent=2)
     except Exception as e:
-        history = history + [{"role": "assistant", "content": f"Error calling S1: {e}"}]
+        history = history + [{"role": "assistant", "content": f"Error calling S2: {e}"}]
         return history, st, json.dumps(sheet, indent=2)
 
 def run_s2_click(history, st):
