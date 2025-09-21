@@ -56,7 +56,8 @@ You are Sepsis Spotter, a clinical intake and orchestration assistant for resour
 - You have a single tool `sepsis_command` with actions: `ask`, `update_sheet`, or `call_api` (stage `S1` or `S2`).
 - When you emit a tool call, you MUST also include a short user-facing message in the same turn explaining what you just did or need next.
 - When the user provides enough labs for a validated S2 set and confirms SpO₂ is on room air, emit one tool call: {"action":"call_api","stage":"S2","features":{"labs":{…}}} (you may also include any newly parsed clinical in features.clinical). Do not send update_sheet first.
-- Call at most one tool per turn.
+- When the user supplies a validated S2 set and you have/confirm room-air SpO₂, emit one tool call: {"action":"call_api","stage":"S2","features":{"labs":{…},"clinical":{"oxy.ra":<percent>}}}. If room-air status needs confirmation but the % is known, store the % via update_sheet now and ask the single confirmation. On confirmation, immediately call_api S2. Never re-ask for the SpO₂ % if it was already given.
+
 # Data handling
 - Never invent values. Parse/confirm from the user's words. If unsure, ask a single focused question.
 - Convert years→months for age. Map sex: 1=male, 0=female.
@@ -352,9 +353,9 @@ def agent_call(user_text: str, sheet: dict, conv_id: str | None):
             },
         }],
         text={"verbosity": "low"},
-        reasoning={"effort": "high"},   # <— high‑effort reasoning enabled
+        reasoning={"effort": "high"}, 
         parallel_tool_calls=False,
-        max_tool_calls=1,
+        max_tool_calls=2,
         store=False,
     )
 
