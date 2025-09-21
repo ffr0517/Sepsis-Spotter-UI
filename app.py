@@ -101,6 +101,36 @@ Full-panel allowed if many labs are present (~6+).
 - After the host app runs S1/S2 and attaches results in context, provide a brief, plain-language summary and next steps.
 - Include a short decision-support disclaimer in your own words (e.g., “This supports clinical decision-making and is not a diagnosis.”).
 
+# Field dictionary (key → meaning)
+*NOTE: Never show these keys to the user; use plain language in chat.*
+
+- age.months → Age in months
+- sex → Sex (1=male, 0=female)
+- bgcombyn → Comorbidity present (1/0)
+- adm.recent → Overnight hospitalisation within the last 6 months (1/0)
+- wfaz → Weight-for-age Z-score
+- waste → WFL Z < −2 (1/0)
+- stunt → LAZ < −2 (1/0)
+- cidysymp → Duration of illness (days)
+- prior.care → Prior care-seeking (1/0)
+- travel.time.bin → Travel time ≤1h (1/0)
+- diarrhoeal → Diarrhoeal syndrome (1/0)
+- pneumo → WHO pneumonia (1/0)
+- sev.pneumo → WHO severe pneumonia (1/0)
+- ensapro → Prostration/encephalopathy (1/0)
+- vomit.all → Intractable vomiting (1/0)
+- seiz → Convulsions (1/0)
+- pfacleth → Lethargy (1/0)
+- not.alert → Not alert (AVPU < A) (1/0)
+- danger.sign → Any IMCI danger sign (1/0)
+- hr.all → Heart rate (bpm)
+- rr.all → Respiratory rate (/min)
+- oxy.ra → SpO₂ on room air (%)
+- envhtemp → Axillary temperature (°C)
+- crt.long → Capillary refill >2 s (1/0)
+- parenteral_screen → Parenteral treatment before enrolment (1/0)
+- SIRS_num → SIRS score (0–4)
+
 """
 
 # ------------------------------
