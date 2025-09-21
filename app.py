@@ -395,7 +395,7 @@ def run_pipeline(state, user_text, use_llm=True):
     if cmd and cmd.get("action") == "update_sheet":
         sheet = merge_features(sheet, cmd.get("features") or {})
         state["sheet"] = sheet
-    return state, (say or "Okay.")
+    return state, (say or "Current info sheet updated. If this looks right, press **Run S1** if this is the first input, or **Run S2** if labs are present and you have already ran S1 for meta probabilities.")
 
 def run_s1_click(history, st):
     sheet = st.get("sheet") or new_sheet()
@@ -523,7 +523,7 @@ with gr.Blocks(fill_height=True) as ui:
                 )
                 gr.Markdown(
                     "<div style='margin-top:8px; font-size:12px; color:#6b7280;'>"
-                    "Timeouts may occur on first use if the backend is cold. Try again shortly."
+                    "Timeouts may occur on first use if the backend is cold. If you encounter issues when first running S1 or S2, please try again after a few moments. "
                     "</div>"
                 )
 
