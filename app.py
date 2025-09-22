@@ -371,6 +371,21 @@ def merge_features(sheet, feats):
         feats.get("labs") or {},
     )
 
+def s1_min_ready(sheet: dict) -> bool:
+    clin = (sheet or {}).get("features", {}).get("clinical", {}) or {}
+    return len(missing_for_s1(clin)) == 0
+
+def s2_enabled(sheet: dict) -> bool:
+    # Keep S2 disabled until S1 has been run at least once
+    return bool((sheet or {}).get("s1"))
+
+def compute_btn_states(st: dict):
+    sheet = (st or {}).get("sheet") or {}
+    return (
+        gr.update(interactive=s1_min_ready(sheet)),     # for btn_s1
+        gr.update(interactive=s2_enabled(sheet)),       # for btn_s2
+    )
+
 # ------------------------------
 # Lightweight legacy extractor (fallback when LLM unavailable)
 # ------------------------------
@@ -581,7 +596,8 @@ def run_s1_click(history, st):
     if missing:
         msg = "Missing required fields for S1: " + ", ".join(missing) + "."
         history = history + [{"role": "assistant", "content": msg}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
 
     try:
         s1 = call_s1(sheet["features"]["clinical"])
@@ -605,16 +621,19 @@ def run_s1_click(history, st):
         # Standardized message (no “next steps”)
         summary = format_s1_output(s1)
         history = history + [{"role": "assistant", "content": summary}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
 
     except requests.Timeout:
         history = history + [{"role": "assistant",
                               "content": f"S1 timed out after {int(float(READ_TIMEOUT_S1))}s. "
                                          "The Info Sheet is unchanged. Try again or increase SEPSIS_API_READ_TIMEOUT_S1."}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
     except Exception as e:
         history = history + [{"role": "assistant", "content": f"Error calling S1: {e}"}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
 
 def run_s2_click(history, st):
     sheet = st.get("sheet") or new_sheet()
@@ -625,12 +644,12 @@ def run_s2_click(history, st):
     vname = validated_set_name(merged)
     if vname is None and not st.get("awaiting_unvalidated_s2"):
         st["awaiting_unvalidated_s2"] = True
-        # Short, deterministic warning (no LLM “next steps”)
         warn = ("Warning: this biomarker combination is NOT VALIDATED. Results may be unreliable. "
                 "Press **Run S2** again to proceed anyway, or add a validated set "
-                "(A: CRP+TNFR1+suPAR+SpO₂ RA; B: CRP+CXCl10+IL6+SpO₂ RA).")
+                "(A: CRP+TNFR1+suPAR+SpO₂ RA; B: CRP+CXCL10+IL6+SpO₂ RA).")
         history = history + [{"role": "assistant", "content": warn}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
 
     try:
         s2 = call_s2(merged, apply_calibration=True)
@@ -638,19 +657,21 @@ def run_s2_click(history, st):
         st["sheet"] = sheet
         st["awaiting_unvalidated_s2"] = False
 
-        # Standardized message only
         summary = format_s2_output(s2)
         history = history + [{"role": "assistant", "content": summary}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
 
     except requests.Timeout:
         history = history + [{"role": "assistant",
                               "content": f"S2 timed out after {int(float(READ_TIMEOUT_S2))}s. "
                                          "The Info Sheet is unchanged. Try again or increase SEPSIS_API_READ_TIMEOUT_S2."}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
     except Exception as e:
         history = history + [{"role": "assistant", "content": f"Error calling S2: {e}"}]
-        return history, st, json.dumps(sheet, indent=2)
+        s1_upd, s2_upd = compute_btn_states(st)
+        return history, st, json.dumps(sheet, indent=2), s1_upd, s2_upd
 
 # ------------------------------
 # Minimal UI (host never injects dialogue text)
@@ -685,11 +706,11 @@ with gr.Blocks(fill_height=True) as ui:
             with gr.Column(scale=3):
                 chat = gr.Chatbot(height=420, type="messages")
                 msg  = gr.Textbox(placeholder="Describe the case…", lines=3)
-                use_llm_chk = gr.Checkbox(value=USE_LLM_DEFAULT, label="Use OpenAI LLM (agent mode)")
+                use_llm_chk = gr.Checkbox(value=USE_LLM_DEFAULT, label="Use LLM to parse input (if available)", info="If unchecked, a lightweight built-in parser will extract basic fields only.")
                 with gr.Row():
-                    btn_send = gr.Button("Send")     # was btn_run
-                    btn_s1   = gr.Button("Run S1")
-                    btn_s2   = gr.Button("Run S2")
+                    btn_send = gr.Button("Send Message")
+                    btn_s1   = gr.Button("Run S1", interactive=False)   # start disabled
+                    btn_s2   = gr.Button("Run S2", interactive=False)   # start disabled
                     btn_new  = gr.Button("New Chat")
             with gr.Column(scale=2):
                 info = gr.Textbox(label="Current Info Sheet (JSON)", lines=22)
@@ -710,8 +731,16 @@ with gr.Blocks(fill_height=True) as ui:
 
         state = gr.State(new_state())
 
+        def new_chat_and_bootstrap():
+            chat_reset, st, info_reset, paste_reset, tips_reset = reset_all()
+            history = chat_reset + [{"role": "user", "content": ""}]
+            st, reply = run_pipeline(st, "", use_llm=True)
+            history = history + [{"role": "assistant", "content": reply}]
+            info_json = json.dumps(st.get("sheet", {}), indent=2)
+            return history, st, info_json, paste_reset, tips_reset
+
         def reset_all():
-            return [], new_state(), "", "", ""
+            return [], new_state(), "", "", "", gr.update(interactive=False), gr.update(interactive=False)
 
         def on_user_send(history, text):
             history = history + [{"role": "user", "content": text}]
@@ -721,48 +750,40 @@ with gr.Blocks(fill_height=True) as ui:
             st, reply = run_pipeline(st, history[-1]["content"], use_llm=bool(use_llm))
             history = history + [{"role": "assistant", "content": reply}]
             info_json = json.dumps(st.get("sheet", {}), indent=2)
-            return history, st, info_json, ""
+            s1_upd, s2_upd = compute_btn_states(st)
+            return history, st, info_json, "", s1_upd, s2_upd
 
         def on_merge(st, pasted):
             try:
                 blob = json.loads(pasted)
             except Exception:
-                return st, "Could not parse pasted JSON.", ""
+                s1_upd, s2_upd = compute_btn_states(st)
+                return st, "Could not parse pasted JSON.", "", s1_upd, s2_upd
             if st.get("sheet"):
                 st["sheet"] = merge_sheet(
                     st["sheet"],
                     blob.get("features", {}).get("clinical", {}),
                     blob.get("features", {}).get("labs", {})
-                )
+                    )
             else:
                 st["sheet"] = blob
-            return st, "Merged.", json.dumps(st["sheet"], indent=2)
-        
-        def new_chat_and_bootstrap():
-            chat_reset, st, info_reset, paste_reset, tips_reset = reset_all()
-            history = chat_reset + [{"role": "user", "content": ""}]
-            st, reply = run_pipeline(st, "", use_llm=True)
-            history = history + [{"role": "assistant", "content": reply}]
-            info_json = json.dumps(st.get("sheet", {}), indent=2)
-            return history, st, info_json, paste_reset, tips_reset
-        
-        btn_new.click(
-            reset_all,
-            inputs=None,
-            outputs=[chat, state, info, paste, tips],
-            )
+            s1_upd, s2_upd = compute_btn_states(st)
+            return st, "Merged.", json.dumps(st["sheet"], indent=2), s1_upd, s2_upd
 
-        btn_s1.click(run_s1_click, [chat, state], [chat, state, info])
-        btn_s2.click(run_s2_click, [chat, state], [chat, state, info])
+        btn_s1.click(run_s1_click, [chat, state], [chat, state, info, btn_s1, btn_s2])
+        btn_s2.click(run_s2_click, [chat, state], [chat, state, info, btn_s1, btn_s2])
+
 
         login_btn.click(check_login, [u, p], [login_view, app_view, login_msg, state])
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg]
+            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg, btn_s1, btn_s2]
             )
         btn_send.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg]
+            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg, btn_s1, btn_s2]
             )
-        merge_btn.click(on_merge, [state, paste], [state, tips, info])
+        merge_btn.click(on_merge, [state, paste], [state, tips, info, btn_s1, btn_s2])
+
+        btn_new.click(reset_all, inputs=None, outputs=[chat, state, info, paste, tips, btn_s1, btn_s2])
 
 IS_SPACES = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID") or os.getenv("SYSTEM") == "spaces")
 if IS_SPACES:
