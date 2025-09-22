@@ -47,6 +47,110 @@ def new_state():
         "awaiting_unvalidated_s2": False,
     }
 
+# -------- Smart readiness + guidance helpers --------
+
+S1_ASK_ORDER = [
+    "age.months", "sex", "adm.recent", "wfaz", "cidysymp",
+    "not.alert", "hr.all", "rr.all", "envhtemp", "crt.long",
+]
+
+S1_FRIENDLY = {
+    "age.months":  "Age in months",
+    "sex":         "Sex (1 = male, 0 = female)",
+    "adm.recent":  "Overnight hospitalisation in the last 6 months? (1 = yes, 0 = no)",
+    "wfaz":        "Weight-for-age Z-score",
+    "cidysymp":    "Duration of illness (days)",
+    "not.alert":   "Not alert (AVPU < A)? (1 = yes, 0 = no)",
+    "hr.all":      "Heart rate (bpm)",
+    "rr.all":      "Respiratory rate (/min)",
+    "envhtemp":    "Axillary temperature (°C)",
+    "crt.long":    "Capillary refill time > 2 s? (1 = yes, 0 = no)",
+}
+
+S2B_ORDER = ["oxy.ra", "CRP", "IL6", "CXCl10"]
+S2B_FRIENDLY = {
+    "oxy.ra":  "SpO₂ on room air (%)",
+    "CRP":     "CRP (mg/L)",
+    "IL6":     "IL-6 (pg/mL)",
+    "CXCl10":  "CXCL10 (pg/mL)",
+}
+
+def s1_ready(sheet: dict) -> bool:
+    clin = (sheet or {}).get("features", {}).get("clinical", {}) or {}
+    return len(missing_for_s1(clin)) == 0
+
+def s1_decision(sheet: dict) -> str:
+    from_str = _first(((sheet or {}).get("s1") or {}).get("s1_decision"))
+    return _norm_key(from_str)
+
+def s2_ready(sheet: dict) -> bool:
+    feats = (sheet or {}).get("features", {}) or {}
+    clin = feats.get("clinical", {}) or {}
+    labs = feats.get("labs", {}) or {}
+    merged = {**clin, **labs}
+    return validated_set_name(merged) is not None
+
+def missing_for_s2_setB(sheet: dict):
+    feats = (sheet or {}).get("features", {}) or {}
+    clin = feats.get("clinical", {}) or {}
+    labs = feats.get("labs", {}) or {}
+    merged = {**clin, **labs}
+    missing = []
+    for k in S2B_ORDER:
+        v = merged.get(k)
+        if v in (None, "", 0, 0.0):
+            missing.append(k)
+    return missing
+
+def build_s1_missing_prompt(missing_keys) -> str:
+    # Compact “opening message” variant: only show the items still missing
+    lines = [
+        "This is clinical decision support, not a diagnosis.",
+        "",
+        "To run Stage 1 (S1), please provide the remaining details:",
+    ]
+    for k in missing_keys:
+        lines.append(f"• {S1_FRIENDLY.get(k, k)}")
+    return "\n".join(lines)
+
+def build_s2_missing_prompt(missing_keys) -> str:
+    lines = [
+        "To run Stage 2 (S2) with Set B, please add:",
+    ]
+    for k in missing_keys:
+        lines.append(f"• {S2B_FRIENDLY.get(k, k)}")
+    # Optional hint about Set A:
+    lines.append("Alternatively, Set A can be used: CRP, TNFR1, suPAR, and SpO₂ on room air.")
+    return "\n".join(lines)
+
+def build_guidance_after_update(sheet: dict) -> str:
+    """
+    Returns the best next message after the Info Sheet was updated:
+      - If S1 not run yet:
+          - If S1 ready → 'Info Sheet updated. If the Info Sheet looks right, press Run S1.'
+          - Else → S1 missing prompt (no 'Info Sheet updated.' prefix)
+      - If S1 run and decision is OTHER:
+          - If Set B (or full/Set A) is ready → 'Info Sheet updated. If you’re ready, press Run S2.'
+          - Else → S2 missing prompt (Set B) (no 'Info Sheet updated.' prefix)
+      - Else (S1 Severe/NotSevere) → terse acknowledgement.
+    """
+    if "s1" not in (sheet or {}):
+        if s1_ready(sheet):
+            return "Info Sheet updated. If the Info Sheet looks right, press **Run S1**."
+        missing = missing_for_s1((sheet.get("features", {}).get("clinical", {})) if sheet else {})
+        return build_s1_missing_prompt(missing)
+
+    # S1 exists
+    dec = s1_decision(sheet)
+    if dec == "OTHER":
+        if s2_ready(sheet):
+            return "Info Sheet updated. If you’re ready, press **Run S2**."
+        missing = missing_for_s2_setB(sheet)
+        return build_s2_missing_prompt(missing)
+
+    # S1 was Severe or NotSevere; keep it minimal
+    return "Info Sheet updated."
+
 # ------------------------------
 # OpenAI client & config
 # ------------------------------
@@ -587,9 +691,18 @@ def run_pipeline(state, user_text, use_llm=True):
     # Only fall back if the model returned nothing.
     if say:
         return state, say
+
+    # SMART host fallback: after updates, show availability or ask for missing
     if updated:
-        return state, "Info Sheet updated."
-    return state, "Noted. If the *Current info* sheet looks right, press **Run S1** or **Run S2**."
+        guidance = build_guidance_after_update(state.get("sheet") or {})
+        return state, guidance
+
+    # Even if nothing changed, try to guide user if we can
+    guidance = build_guidance_after_update(state.get("sheet") or {})
+    if guidance:
+        return state, guidance
+
+    return state, "Okay."
 
 def run_s1_click(history, st):
     sheet = st.get("sheet") or new_sheet()
