@@ -133,6 +133,7 @@ Full-panel allowed if many labs are present (~6+). When asking for labs, prefer 
   • If S1 has been run and the decision is **Severe** or **NOTSevere** → acknowledge briefly and do **not** provide treatment recommendations.
 - Avoid repeating the same “press Run …” line in back-to-back turns unless new information was added.
 - Keep messages short: a brief acknowledgement of the update, then the single directive/question.
+- When you use {"action":"ask"}, you MUST also include the exact same question in your assistant message. Do not reply with generic acknowledgements.
 
 # Result summaries
 - After the host app runs S1/S2 and attaches results in context, provide a brief, plain-language recap only (no treatment “next steps”), then include a short decision-support disclaimer in your own words (e.g., “This supports clinical decision-making and is not a diagnosis.”).
@@ -588,7 +589,7 @@ def run_pipeline(state, user_text, use_llm=True):
         return state, say
     if updated:
         return state, "Info Sheet updated."
-    return state, "Okay."
+    return state, "Noted. If the *Current info* sheet looks right, press **Run S1** or **Run S2**."
 
 def run_s1_click(history, st):
     sheet = st.get("sheet") or new_sheet()
