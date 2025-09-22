@@ -396,7 +396,8 @@ def format_s1_output(s1_json: dict) -> str:
             "S1 decision: OTHER. According to model specifics, laboratory tests/biomarkers are required to make a more "
             "informed outcome prediction."
             "If you have any laboratory results available, please provide them to run Stage S2 (S2)."
-            "If you want to know which laboratory tests are compatible OR which minimal sets may be used, please ask."
+            "Please record the provided current info sheet for your records, and use the 'Merge' function with this JSON if returning with laboratory results or clinical details are a later time."
+            "If you want to know which laboratory tests are compatible OR what minimal sets may be used, please ask."
         )
     return f"{body}\n\n{S_DISCLAIMER}"
 
@@ -667,17 +668,18 @@ def agent_followup(sheet: dict, last_user: str = "", note: str = ""):
 # Pipeline (host doesn’t craft dialogue)
 # ------------------------------
 
-def run_pipeline(state, user_text, use_llm=True):
+def run_pipeline(state, user_text):
     state = state or {"sheet": None}
     sheet = state.get("sheet") or new_sheet()
 
     have_key = len(os.getenv("OPENAI_API_KEY", "").strip()) >= 20
-    if not use_llm or not have_key or PARSER_MODE != "llm_only":
+    # Fallback to legacy parser only when key missing or parser mode overridden
+    if not have_key or PARSER_MODE != "llm_only":
         clin, labs, _ = extract_features(user_text or "")
         if clin or labs:
             sheet = merge_sheet(sheet, clin, labs)
             state["sheet"] = sheet
-        # keep this terse; the LLM isn't in play here
+        # keep deterministic host message
         return state, "Noted. If this looks right, press **Run S1** or **Run S2**."
 
     say, cmd = agent_call(user_text=user_text, sheet=sheet, conv_id=None)
@@ -688,16 +690,13 @@ def run_pipeline(state, user_text, use_llm=True):
         state["sheet"] = sheet
         updated = True
 
-    # Only fall back if the model returned nothing.
     if say:
         return state, say
 
-    # SMART host fallback: after updates, show availability or ask for missing
     if updated:
         guidance = build_guidance_after_update(state.get("sheet") or {})
         return state, guidance
 
-    # Even if nothing changed, try to guide user if we can
     guidance = build_guidance_after_update(state.get("sheet") or {})
     if guidance:
         return state, guidance
@@ -820,7 +819,6 @@ with gr.Blocks(fill_height=True) as ui:
             with gr.Column(scale=3):
                 chat = gr.Chatbot(height=420, type="messages")
                 msg  = gr.Textbox(placeholder="Describe the case…", lines=3)
-                use_llm_chk = gr.Checkbox(value=USE_LLM_DEFAULT, label="Use LLM to parse input (if available)", info="If unchecked, a lightweight built-in parser will extract basic fields only.")
                 with gr.Row():
                     btn_send = gr.Button("Send Message")
                     btn_s1   = gr.Button("Run S1", interactive=False)   # start disabled
@@ -848,7 +846,7 @@ with gr.Blocks(fill_height=True) as ui:
         def new_chat_and_bootstrap():
             chat_reset, st, info_reset, paste_reset, tips_reset = reset_all()
             history = chat_reset + [{"role": "user", "content": ""}]
-            st, reply = run_pipeline(st, "", use_llm=True)
+            st, reply = run_pipeline(st, "")
             history = history + [{"role": "assistant", "content": reply}]
             info_json = json.dumps(st.get("sheet", {}), indent=2)
             return history, st, info_json, paste_reset, tips_reset
@@ -860,8 +858,8 @@ with gr.Blocks(fill_height=True) as ui:
             history = history + [{"role": "user", "content": text}]
             return history, ""
         
-        def on_bot_reply(history, st, use_llm):
-            st, reply = run_pipeline(st, history[-1]["content"], use_llm=bool(use_llm))
+        def on_bot_reply(history, st):
+            st, reply = run_pipeline(st, history[-1]["content"])
             history = history + [{"role": "assistant", "content": reply}]
             info_json = json.dumps(st.get("sheet", {}), indent=2)
             s1_upd, s2_upd = compute_btn_states(st)
@@ -890,10 +888,10 @@ with gr.Blocks(fill_height=True) as ui:
 
         login_btn.click(check_login, [u, p], [login_view, app_view, login_msg, state])
         msg.submit(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg, btn_s1, btn_s2]
+            on_bot_reply, [chat, state], [chat, state, info, msg, btn_s1, btn_s2]
             )
         btn_send.click(on_user_send, [chat, msg], [chat, msg]).then(
-            on_bot_reply, [chat, state, use_llm_chk], [chat, state, info, msg, btn_s1, btn_s2]
+            on_bot_reply, [chat, state], [chat, state, info, msg, btn_s1, btn_s2]
             )
         merge_btn.click(on_merge, [state, paste], [state, tips, info, btn_s1, btn_s2])
 
