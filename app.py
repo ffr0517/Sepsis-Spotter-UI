@@ -394,10 +394,10 @@ def format_s1_output(s1_json: dict) -> str:
     else:
         body = (
             "S1 decision: OTHER. According to model specifics, laboratory tests/biomarkers are required to make a more "
-            "informed outcome prediction."
-            "If you have any laboratory results available, please provide them to run Stage S2 (S2)."
-            "Please record the provided current info sheet for your records, and use the 'Merge' function with this JSON if returning with laboratory results or clinical details are a later time."
-            "If you want to know which laboratory tests are compatible OR what minimal sets may be used, please ask."
+            "informed outcome prediction. "
+            "If you have any laboratory results available, please provide them to run Stage S2 (S2). "
+            "Please record the provided current info sheet for your records, and use the 'Merge' function with this JSON if returning with laboratory results or clinical details are a later time. "
+            "If you want to know which laboratory tests are compatible OR what minimal sets may be used, please ask. "
         )
     return f"{body}\n\n{S_DISCLAIMER}"
 
